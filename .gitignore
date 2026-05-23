@@ -1,0 +1,30 @@
+# Python virtual environments
+venv*/
+venv/
+.venv/
+env/
+ENV/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.cursor/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Runtime data / indexes
+knowledge-base-final/index/
+
+# Old project version
+knowledge-base/
+
+# Unrelated files
+minesweeper.html
+pomodoro.html
+tesseract.zip
+华夏中才项目管理系统-等保测评报告.md
