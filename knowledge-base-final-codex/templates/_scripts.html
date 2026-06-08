@@ -1809,8 +1809,10 @@ function switchAnalysisMode(mode) {
   analysisMode = mode;
   document.getElementById('panelFocus').style.display = mode === 'focus' ? '' : 'none';
   document.getElementById('panelScan').style.display = mode === 'scan' ? '' : 'none';
+  document.getElementById('panelCompare').style.display = mode === 'compare' ? '' : 'none';
   document.getElementById('modeLabelA').classList.toggle('active', mode === 'focus');
   document.getElementById('modeLabelB').classList.toggle('active', mode === 'scan');
+  document.getElementById('modeLabelC').classList.toggle('active', mode === 'compare');
 }
 
 async function loadAnalysisFileList() {
@@ -2088,6 +2090,59 @@ function clearAnalysis() {
   });
   document.getElementById('analysisResults').style.display = 'none';
   document.getElementById('analysisOutput').innerHTML = '';
+}
+
+async function runCompareAnalysis() {
+  var task = document.getElementById('compareTask').value.trim();
+  if (!task) { showToast('请描述对比任务', 'error'); return; }
+  if (!state.settings.api_key) { showToast('请先配置 API 密钥', 'error'); openSettings(); return; }
+
+  var resultsDiv = document.getElementById('analysisResults');
+  var spinner = document.getElementById('analysisSpinner');
+  var progress = document.getElementById('analysisProgress');
+  var output = document.getElementById('analysisOutput');
+  var sourcesDiv = document.getElementById('analysisSources');
+  var sourcesList = document.getElementById('analysisSourcesList');
+
+  resultsDiv.style.display = '';
+  spinner.style.display = '';
+  output.innerHTML = '';
+  sourcesDiv.style.display = 'none';
+  document.getElementById('analysisResultsTitle').textContent = '条文对比中...';
+  progress.textContent = '正在检索原文并逐条对比...';
+  document.getElementById('btnCompareRun').disabled = true;
+
+  try {
+    var res = await fetch('/api/analysis/compare', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        task: task,
+        api_key: state.settings.api_key,
+        kb_name: state.currentKb,
+      }),
+    });
+    var data = await res.json();
+    spinner.style.display = 'none';
+
+    if (data.success) {
+      document.getElementById('analysisResultsTitle').textContent =
+        '对比结果（原文检索 ' + (data.data.total_hit || 0) + ' 个文件，使用 ' + (data.data.files_used || 0) + ' 个）';
+      output.innerHTML = marked.parse(data.data.result_markdown || '');
+      if (data.data.sources && data.data.sources.length) {
+        sourcesList.innerHTML = data.data.sources.map(function(s) {
+          return '<div class="analysis-source-item">📄 ' + escapeHtml(s.file) + '</div>';
+        }).join('');
+        sourcesDiv.style.display = '';
+      }
+    } else {
+      output.innerHTML = '<div style="color:var(--danger);">' + escapeHtml(data.error || '对比失败') + '</div>';
+    }
+  } catch(e) {
+    spinner.style.display = 'none';
+    output.innerHTML = '<div style="color:var(--danger);">请求失败: ' + escapeHtml(e.message) + '</div>';
+  }
+  document.getElementById('btnCompareRun').disabled = false;
 }
 
 // ==================== INIT ====================

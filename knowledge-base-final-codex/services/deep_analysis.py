@@ -682,3 +682,150 @@ def scan_analysis(framework, api_key=None, kb_name=None):
         "sections": [{"title": r[0], "files_found": len(r[2])} for r in section_results],
         "elapsed": round(elapsed, 1),
     }
+
+
+# ── Mode C: Comparative Clause Analysis ───────────────────
+
+def compare_clauses(task, api_key=None, kb_name=None):
+    """Phase-2 deep comparison: feed original clause text to LLM for detailed diff.
+
+    Unlike focus_analysis and scan_analysis which use MapReduce summaries,
+    this function uses RAW chunk text so the LLM can compare exact wording.
+
+    Args:
+        task: natural-language description of what to compare, e.g.
+              "对比《董事会授权管理办法》与《总经理授权委托管理办法》的权限划分"
+        api_key: DeepSeek API key.
+        kb_name: knowledge base name.
+
+    Returns:
+        {"result_markdown": str, "sources": list, "files_used": int}
+    """
+    api_key = api_key or DEEPSEEK_API_KEY
+    store = get_store(kb_name)
+    store.load()
+
+    t0 = time.time()
+    _logger.info("Compare clauses: task=%s", task[:80])
+
+    # ── Phase 2a: targeted search — find ALL matching chunks with raw text ──
+    hits = _exhaustive_search(store, task)
+    if not hits:
+        return {
+            "result_markdown": "未在知识库中找到与对比主题相关的文件内容。",
+            "sources": [], "files_used": 0,
+        }
+
+    # Sort files by hit count, take top files proportional to task scope
+    sorted_files = sorted(hits.items(), key=lambda x: len(x[1]), reverse=True)
+    total_hit_files = len(sorted_files)
+
+    # Build context with RAW chunk text (no summarization, no MapReduce)
+    # Cap: max 50 chunks per file, 4000 chars per chunk, 60000 chars per file
+    MAX_CHUNKS = 50
+    MAX_CHAR_PER_CHUNK = 4000
+    MAX_CHAR_PER_FILE = 60000
+
+    context_parts = []
+    sources = []
+    seen_files = set()
+
+    for fpath, chunks in sorted_files:
+        if fpath in seen_files:
+            continue
+        seen_files.add(fpath)
+        fname = fpath.split("\\")[-1].split("/")[-1]
+
+        # Sort chunks by index for coherent reading
+        chunks_sorted = sorted(chunks, key=lambda c: c.get("chunk_index", 0))
+
+        # Take representative samples: beginning, evenly-spaced middle, end
+        n = len(chunks_sorted)
+        if n <= MAX_CHUNKS:
+            selected = chunks_sorted
+        else:
+            # Smart sampling: first 15, last 15, and evenly-distributed middle
+            selected = chunks_sorted[:15] + chunks_sorted[-15:]
+            step = max(1, (n - 30) // 20)
+            middle = chunks_sorted[15:-15:step]
+            # Deduplicate by chunk_id
+            seen_ids = {c["chunk_id"] for c in selected}
+            for c in middle:
+                if c["chunk_id"] not in seen_ids:
+                    selected.append(c)
+                    seen_ids.add(c["chunk_id"])
+            selected.sort(key=lambda c: c.get("chunk_index", 0))
+
+        file_text_parts = []
+        file_char_count = 0
+        for c in selected:
+            chunk_text = c["text"][:MAX_CHAR_PER_CHUNK]
+            if file_char_count + len(chunk_text) > MAX_CHAR_PER_FILE:
+                file_text_parts.append("\n...(后续内容因长度限制省略)")
+                break
+            page_tag = ""
+            if c.get("metadata") and c["metadata"].get("page"):
+                page_tag = f" [第{c['metadata']['page']}页]"
+            file_text_parts.append(
+                f"--- Chunk {c.get('chunk_index', 0) + 1}/{c.get('total_chunks', '?')}{page_tag} ---\n{chunk_text}"
+            )
+            file_char_count += len(chunk_text)
+
+        file_text = "\n\n".join(file_text_parts)
+        context_parts.append(f"===== {fname} =====\n{file_text}")
+        sources.append({"file": fname, "file_path": fpath})
+
+    # Limit total context to ~40 files to keep prompt manageable
+    if len(context_parts) > 40:
+        context_parts = context_parts[:40]
+        context_parts.append(f"\n（共命中 {total_hit_files} 个文件，此处展示最相关的 40 个）")
+
+    context = "\n\n".join(context_parts)
+
+    # ── Phase 2b: detailed clause comparison ──
+    system = (
+        "你是一名专业审计师，精通制度对比分析。你的任务是将多份制度文件的原文条款"
+        "进行逐条比对，找出实质性冲突、权限重叠、定义矛盾、程序不一致等问题。"
+        "必须引用原文具体条文作为证据，绝不可凭空推断。"
+    )
+    prompt = (
+        f"【对比任务】\n{task}\n\n"
+        f"【制度原文】（共命中 {total_hit_files} 个文件，以下为原文摘录，未经摘要压缩）\n"
+        f"{context}\n\n"
+        "请按以下结构输出：\n\n"
+        "## 一、涉及文件\n列出本次对比涉及的文件及其章节范围\n\n"
+        "## 二、逐条对比\n"
+        "对每个相关条款进行并排对比，使用以下格式：\n"
+        "- **主题**：XXX\n"
+        "- **文件A**（文件名）：引用原文\n"
+        "- **文件B**（文件名）：引用原文\n"
+        "- **分析**：两文件规定是否一致？如有冲突说明具体差异\n\n"
+        "## 三、冲突清单\n"
+        "用表格列出所有发现的冲突/不一致：\n"
+        "| 类型 | 文件A | 文件B | 冲突描述 | 严重程度 |\n"
+        "|---|---|---|---|---|\n"
+        "（类型：权限冲突 / 定义矛盾 / 程序不一致 / 覆盖重叠 / 条款缺失）\n\n"
+        "## 四、合规建议\n"
+        "针对每项冲突给出具体修订建议\n\n"
+        "要求：\n"
+        "- 必须引用文件中的原文具体条文（条款编号、章节名、原文段落）\n"
+        "- 如文件中无相关内容，明确说明「该文件未涉及此条款」\n"
+        "- 标注 ⚠️ 标记实质性冲突\n"
+        "- 标注 ✅ 标记一致的规定"
+    )
+
+    result = chat_completion(
+        prompt=prompt, system_prompt=system,
+        api_key=api_key, temperature=0.2, max_tokens=24576,
+    )
+
+    elapsed = time.time() - t0
+    _logger.info("Compare clauses done: %d files, %.1fs", len(sources), elapsed)
+
+    return {
+        "result_markdown": result or "对比分析未能完成，请重试。",
+        "sources": sources,
+        "files_used": len(sources),
+        "total_hit": total_hit_files,
+        "elapsed": round(elapsed, 1),
+    }

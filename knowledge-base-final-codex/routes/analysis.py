@@ -3,7 +3,7 @@
 from flask import Blueprint, request, jsonify
 
 import config
-from services.deep_analysis import focus_analysis, scan_analysis
+from services.deep_analysis import focus_analysis, scan_analysis, compare_clauses
 
 analysis_bp = Blueprint("analysis", __name__)
 
@@ -45,3 +45,21 @@ def scan():
         return jsonify({"success": True, "data": result})
     except Exception as e:
         return jsonify({"success": False, "error": f"分析失败: {str(e)}"})
+
+
+@analysis_bp.route("/api/analysis/compare", methods=["POST"])
+def compare():
+    """Mode C: compare specific clauses across documents using raw original text."""
+    data = request.get_json() or {}
+    task = data.get("task", "").strip()
+    api_key = data.get("api_key", config.DEEPSEEK_API_KEY)
+    kb_name = data.get("kb_name", config.CURRENT_KB)
+
+    if not task:
+        return jsonify({"success": False, "error": "请描述对比任务"})
+
+    try:
+        result = compare_clauses(task, api_key=api_key, kb_name=kb_name)
+        return jsonify({"success": True, "data": result})
+    except Exception as e:
+        return jsonify({"success": False, "error": f"对比失败: {str(e)}"})

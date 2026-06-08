@@ -200,6 +200,9 @@
         <label class="analysis-mode-label" id="modeLabelB" onclick="switchAnalysisMode('scan')">
           <input type="radio" name="analysisMode" value="scan" /> 📋 全库遍历
         </label>
+        <label class="analysis-mode-label" id="modeLabelC" onclick="switchAnalysisMode('compare')">
+          <input type="radio" name="analysisMode" value="compare" /> ⚖️ 条文对比
+        </label>
       </div>
 
       <!-- Mode A: Focus -->
@@ -249,6 +252,17 @@
         <div style="display:flex;align-items:center;gap:12px;margin-top:10px;">
           <button class="btn btn-primary" onclick="runScanAnalysis()" id="btnScanRun">🔍 开始遍历分析</button>
           <span style="font-size:12px;color:var(--text-muted);" id="scanEstimate"></span>
+        </div>
+      </div>
+
+      <!-- Mode C: Clause Compare -->
+      <div class="analysis-panel" id="panelCompare" style="display:none;">
+        <div class="analysis-section-label">⚖️ 条文对比 — 用制度原文逐条对比，不做摘要压缩</div>
+        <textarea id="compareTask" placeholder="描述你要对比的内容，例如：&#10;对比《董事会向经理层授权的管理办法》与《总经理授权委托管理办法》中关于授权范围和权限划分的条款，找出实质性冲突和矛盾之处。" rows="6"
+          style="width:100%;padding:12px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);color:var(--text);font-size:14px;outline:none;resize:vertical;font-family:inherit;line-height:1.6;margin-top:10px;"></textarea>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:10px;">
+          <button class="btn btn-primary" onclick="runCompareAnalysis()" id="btnCompareRun">⚖️ 开始条文对比</button>
+          <span style="font-size:12px;color:var(--text-muted);">使用原文精确检索，逐条对比</span>
         </div>
       </div>
 
