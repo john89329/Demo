@@ -1,4 +1,3 @@
-import os
 import threading
 import fitz  # PyMuPDF
 
@@ -11,47 +10,41 @@ def _get_ocr():
     if _ocr_instance is None:
         with _ocr_lock:
             if _ocr_instance is None:
-                from paddleocr import PaddleOCR
-                _ocr_instance = PaddleOCR(
-                    use_angle_cls=True,
-                    lang='ch',
-                    use_gpu=False,
-                    show_log=False,
-                )
+                from rapidocr_onnxruntime import RapidOCR
+                _ocr_instance = RapidOCR()
     return _ocr_instance
 
 
-def ocr_image(path):
+def _ocr_bytes(data):
+    """OCR from bytes (PNG/JPEG image data in memory)."""
     ocr = _get_ocr()
-    result = ocr.ocr(path, cls=True)
-    if not result or not result[0]:
+    result, _ = ocr(data)
+    if not result:
         return ""
     lines = []
-    for line in result[0]:
-        text = line[1][0] if line[1] else ""
+    for line in result:
+        text = line[1] if line[1] else ""
+        text = text.replace(" ", "")
         if text.strip():
             lines.append(text.strip())
     return "\n".join(lines)
 
 
+def ocr_image(path):
+    with open(path, "rb") as f:
+        return _ocr_bytes(f.read())
+
+
 def ocr_pdf(file_path, max_pages=None):
     doc = fitz.open(file_path)
-    ocr = _get_ocr()
     all_text = []
     pages_to_process = min(len(doc), max_pages or len(doc))
     for i in range(pages_to_process):
         page = doc[i]
-        pix = page.get_pixmap(dpi=200)
-        img_path = f"{file_path}.ocr_page_{i}.png"
-        pix.save(img_path)
-        try:
-            text = ocr_image(img_path)
-            if text:
-                all_text.append(f"--- Page {i + 1} ---\n{text}")
-        finally:
-            try:
-                os.remove(img_path)
-            except Exception:
-                pass
+        pix = page.get_pixmap(dpi=150)
+        png_bytes = pix.tobytes("png")
+        text = _ocr_bytes(png_bytes)
+        if text:
+            all_text.append(f"--- Page {i + 1} ---\n{text}")
     doc.close()
     return "\n\n".join(all_text)

@@ -228,6 +228,138 @@
     line-height: 1.5;
   }
 
+  /* ============ File Progress Panel ============ */
+  .file-progress-panel {
+    max-height: 300px;
+    overflow-y: auto;
+    margin-top: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+  }
+  .file-progress-panel::-webkit-scrollbar { width: 4px; }
+  .file-progress-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  .fp-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    font-size: 11px;
+    border-bottom: 1px solid var(--border-light, #f0f0f0);
+  }
+  .fp-item:last-child { border-bottom: none; }
+  .fp-item .fp-icon { flex-shrink: 0; width: 16px; text-align: center; }
+  .fp-item .fp-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text);
+  }
+  .fp-item .fp-status {
+    flex-shrink: 0;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 10px;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  .fp-status.pending { color: var(--text-muted); background: var(--border-light, #eee); }
+  .fp-status.parsing { color: #fff; background: #f0ad4e; }
+  .fp-status.parsed { color: #fff; background: #5bc0de; }
+  .fp-status.embedding { color: #fff; background: #5bc0de; animation: fp-pulse 1s infinite; }
+  .fp-status.embedded { color: #fff; background: #5cb85c; }
+  .fp-status.error { color: #fff; background: var(--danger); }
+  .fp-status.duplicate { color: var(--text-muted); background: var(--border-light, #eee); }
+  .fp-status.cancelled, .fp-status.cancelling { color: var(--text-muted); background: var(--border-light, #eee); text-decoration: line-through; }
+  .fp-item .fp-chunks {
+    flex-shrink: 0;
+    font-size: 10px;
+    color: var(--text-muted);
+    min-width: 30px;
+    text-align: right;
+  }
+  @keyframes fp-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+  }
+
+  /* ============ Failed Files Panel ============ */
+  .failed-files-panel {
+    margin-top: 8px;
+    border: 1px solid var(--danger-light);
+    border-radius: var(--radius-sm);
+    background: var(--card);
+    max-height: 360px;
+    overflow-y: auto;
+  }
+  .failed-files-panel::-webkit-scrollbar { width: 4px; }
+  .failed-files-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  .failed-summary {
+    padding: 8px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--danger);
+    background: var(--danger-light);
+    border-bottom: 1px solid var(--border-light);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
+  .failed-group {
+    border-bottom: 1px solid var(--border-light);
+  }
+  .failed-group:last-child { border-bottom: none; }
+  .failed-group-header {
+    padding: 6px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    background: var(--bg);
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .failed-group-header:hover { background: var(--card-hover); }
+  .failed-group-header .count { font-weight: 400; color: var(--text-muted); }
+  .failed-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px 3px 16px;
+    font-size: 11px;
+    border-bottom: 1px solid var(--border-light);
+  }
+  .failed-item:last-child { border-bottom: none; }
+  .failed-item .ff-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .failed-item .ff-name:hover { color: var(--primary); text-decoration: underline; }
+  .failed-item .ff-reason {
+    flex-shrink: 0;
+    font-size: 10px;
+    color: var(--text-muted);
+  }
+  .failed-item .ff-btn {
+    flex-shrink: 0;
+    padding: 1px 8px;
+    font-size: 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--card);
+    color: var(--primary);
+    cursor: pointer;
+  }
+  .failed-item .ff-btn:hover { background: var(--primary); color: #fff; }
+
   /* ============ Splitter ============ */
   .splitter {
     width: 6px;
@@ -732,6 +864,11 @@
         <div class="fill" id="progressFill"></div>
       </div>
       <div id="indexStatus"></div>
+      <div class="file-progress-panel" id="fileProgressPanel" style="display:none;"></div>
+      <div class="failed-files-panel" id="failedFilesPanel" style="display:none;">
+        <div class="failed-summary" id="failedSummary"></div>
+        <div class="failed-list" id="failedList"></div>
+      </div>
     </div>
 
     <div class="sidebar-section">
@@ -1127,12 +1264,98 @@ async function retryFile(filePath, cat) {
       else state.indexErrors.dup = state.indexErrors.dup.filter(e => e.path !== filePath);
       renderErrors();
       refreshStatus();
+      renderFailedFiles();  // refresh failed list after retry
     } else {
       showToast(data.error || '重新解析失败', 'error');
     }
   } catch(e) {
     hideLoading();
     showToast('重新解析失败: ' + e.message, 'error');
+  }
+}
+
+async function renderFailedFiles() {
+  const panel = document.getElementById('failedFilesPanel');
+  const summary = document.getElementById('failedSummary');
+  const list = document.getElementById('failedList');
+
+  try {
+    const res = await fetch('/api/kb/failed-files?' + kbQuery());
+    const data = await res.json();
+    if (!data.success || data.data.total === 0) {
+      panel.style.display = 'none';
+      return;
+    }
+
+    const d = data.data;
+    panel.style.display = 'block';
+
+    const labels = {
+      parse_error: '解析失败',
+      embed_error: '嵌入失败',
+      duplicate: '重复跳过',
+      cancelled: '已取消',
+    };
+    const icons = { parse_error: '❌', embed_error: '⬆️', duplicate: '⏭️', cancelled: '🚫' };
+
+    summary.innerHTML = `📋 未入库文件: ${d.total} 个
+      (${d.groups.parse_error.length} 解析失败,
+       ${d.groups.embed_error.length} 嵌入失败,
+       ${d.groups.duplicate.length} 重复,
+       ${d.groups.cancelled.length} 取消)`;
+
+    let html = '';
+    for (const [group, label] of Object.entries(labels)) {
+      const files = d.groups[group] || [];
+      if (files.length === 0) continue;
+      const icon = icons[group] || '';
+      html += `<div class="failed-group">
+        <div class="failed-group-header" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">
+          <span>${icon} ${label}</span>
+          <span class="count">${files.length} 个</span>
+        </div>
+        <div class="failed-group-body">`;
+      for (const f of files) {
+        const name = escapeHtml(f.name || f.path || '未知');
+        const reason = f.error ? escapeHtml(f.error.substring(0, 80)) : label;
+        const retryBtn = (group === 'parse_error' || group === 'embed_error') && f.path
+          ? `<button class="ff-btn" onclick="event.stopPropagation();retryFile('${escapeHtmlAttr(f.path)}','${group==='embed_error'?'embed':'parse'}')">🔄 重试</button>`
+          : '';
+        html += `<div class="failed-item">
+          <span class="ff-name" title="${escapeHtml(f.path || '')}">${name}</span>
+          <span class="ff-reason" title="${escapeHtml(f.error || '')}">${reason}</span>
+          ${retryBtn}
+        </div>`;
+      }
+      html += '</div></div>';
+    }
+
+    list.innerHTML = html;
+  } catch(e) {
+    panel.style.display = 'none';
+  }
+}
+
+function escapeHtmlAttr(str) {
+  return String(str).replace(/&/g,'&amp;').replace(/'/g,'&#39;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function cancelFileIndex(fileIndex) {
+  if (!state.indexing) return;
+  try {
+    const res = await fetch('/api/kb/cancel-file', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ file_index: fileIndex, kb_name: state.currentKb }),
+    });
+    const data = await res.json();
+    if (data.success) {
+      showToast(`已标记文件取消`, 'success');
+    } else {
+      showToast(data.error || '取消失败', 'error');
+    }
+  } catch(e) {
+    showToast('取消失败: ' + e.message, 'error');
   }
 }
 
@@ -1617,12 +1840,19 @@ async function pollIndexStatus() {
       addErrors(st.errors);
     }
 
+    // 渲染文件级进度面板
+    renderFileProgress(st);
+
     if (!st.running) {
       clearInterval(state.indexingPoll);
       state.indexingPoll = null;
       state.indexing = false;
       document.getElementById('progressBar').style.display = 'none';
       document.getElementById('stopBtn').style.display = 'none';
+      document.getElementById('fileProgressPanel').style.display = 'none';
+
+      // Render failed files panel
+      renderFailedFiles();
 
       const totalErrors = state.indexErrors.dup.length + state.indexErrors.parse.length + state.indexErrors.embed.length;
       if (totalErrors > 0) {
@@ -1635,6 +1865,58 @@ async function pollIndexStatus() {
       refreshStatus();
     }
   } catch(e) {}
+}
+
+function renderFileProgress(st) {
+  const panel = document.getElementById('fileProgressPanel');
+  const fss = st.file_statuses;
+  if (!fss || fss.length === 0) {
+    panel.style.display = 'none';
+    return;
+  }
+  panel.style.display = 'block';
+
+  const statusLabel = {
+    pending: '⏳ 等待',
+    parsing: '🔄 解析中',
+    parsed: '📝 已解析',
+    embedding: '⬆️ 嵌入中',
+    embedded: '✅ 完成',
+    error: '❌ 失败',
+    duplicate: '⏭️ 跳过',
+    cancelling: '🚫 取消中',
+    cancelled: '🚫 已取消',
+  };
+
+  const total = fss.length;
+  const done = fss.filter(f => f.status === 'embedded').length;
+  const failed = fss.filter(f => f.status === 'error').length;
+  const cancelled = fss.filter(f => f.status === 'cancelled' || f.status === 'cancelling').length;
+  const processing = fss.filter(f => f.status === 'parsing' || f.status === 'embedding').length;
+
+  let html = `<div style="padding:6px 8px;font-size:11px;color:var(--text-muted);display:flex;justify-content:space-between;">
+    <span>📋 文件进度 (${done}/${total}${failed > 0 ? `, ${failed} 失败` : ''}${cancelled > 0 ? `, ${cancelled} 已取消` : ''}${processing > 0 ? `, ${processing} 进行中` : ''})</span>
+  </div>`;
+
+  for (let idx = 0; idx < fss.length; idx++) {
+    const fs = fss[idx];
+    const st = fs.status || 'pending';
+    const name = fs.name || fs.path || '未知';
+    const fp = fs.path || '';
+    const chunks = fs.chunks ? `${fs.chunks}块` : '';
+    const title = fs.error ? ` title="${escapeHtml(fs.error)}"` : '';
+    const canCancel = (st === 'pending' || st === 'parsing' || st === 'parsed' || st === 'embedding');
+    const cancelBtn = canCancel ? `<button class="btn btn-outline btn-xs" onclick="event.stopPropagation();cancelFileIndex(${idx})" title="取消此文件" style="flex-shrink:0;padding:1px 6px;font-size:10px;color:var(--danger);">❌</button>` : '';
+    const retryBtn = st === 'error' && fp ? `<button class="btn btn-outline btn-xs" onclick="event.stopPropagation();retryFile('${escapeHtmlAttr(fp)}','parse')" title="重新解析" style="flex-shrink:0;padding:1px 6px;font-size:10px;">🔄</button>` : '';
+    html += `<div class="fp-item"${title}>
+      <span class="fp-name">${escapeHtml(name)}</span>
+      ${chunks ? `<span class="fp-chunks">${chunks}</span>` : ''}
+      <span class="fp-status ${st}">${statusLabel[st] || st}</span>
+      ${cancelBtn}${retryBtn}
+    </div>`;
+  }
+
+  panel.innerHTML = html;
 }
 
 async function refreshStatus() {
@@ -1656,6 +1938,9 @@ async function refreshStatus() {
       } else {
         resumeBtn.style.display = 'none';
       }
+
+      // Show failed files from last index run (if any)
+      if (!state.indexing) renderFailedFiles();
     }
   } catch(e) {}
 }
@@ -1878,7 +2163,7 @@ function escapeHtml(str) {
   return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 function escapeHtmlAttr(str) {
-  return String(str || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return String(str || '').replace(/\\/g, '\\\\').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 async function openFile(filePath) {
@@ -1943,7 +2228,7 @@ async function sendMessage() {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({query, api_key: state.settings.api_key, kb_name: state.currentKb}),
+      body: JSON.stringify({query, api_key: state.settings.api_key, embedding_api_key: state.settings.embedding_api_key, kb_name: state.currentKb}),
     });
     const data = await res.json();
     if (data.success) {
@@ -1976,29 +2261,52 @@ function addMessage(role, content) {
 function addAssistantMessage(answer, sources) {
   const container = document.getElementById('chatMessages');
   const sourceMap = new Map();
-  let num = 1;
-  const srcRegex = /\[Source:\s*([^,\]]+?)(?:,\s*([^\]]+?))?\s*\]/gi;
 
+  // Index sources by file name (from backend sources list)
   if (sources) {
     sources.forEach(s => {
       const key = s.file.toLowerCase().trim();
-      if (!sourceMap.has(key)) sourceMap.set(key, { num: num++, display: s.file, filePath: s.file_path || '', positions: [] });
+      if (!sourceMap.has(key)) sourceMap.set(key, { num: sourceMap.size + 1, display: s.file, filePath: s.file_path || '', positions: [] });
     });
   }
+
+  // Scan for positions (page/chunk references) in [Source: filename, position] format.
+  // sourceMap is already fully built from the backend's sources array above —
+  // this loop only records extra position info, never creates new entries.
+  const srcRegex = /\[Source:\s*([^,\]]+?)(?:,\s*([^\]]+?))?\s*\]|\[(\d+)\]/gi;
   let m;
   while ((m = srcRegex.exec(answer)) !== null) {
     const fileName = (m[1] || '').trim();
     const position = (m[2] || '').trim();
-    const key = fileName.toLowerCase();
-    if (sourceMap.has(key)) {
-      if (position && !sourceMap.get(key).positions.includes(position)) sourceMap.get(key).positions.push(position);
-    } else {
-      sourceMap.set(key, { num: num++, display: fileName, filePath: '', positions: position ? [position] : [] });
+    const numRef = m[3] ? parseInt(m[3]) : null;
+
+    let entry = null;
+    if (fileName) {
+      entry = sourceMap.get(fileName.toLowerCase());
+    } else if (numRef && numRef >= 1 && numRef <= (sources || []).length) {
+      const s = sources[numRef - 1];
+      if (s) entry = sourceMap.get(s.file.toLowerCase().trim());
+    }
+    if (entry && position && !entry.positions.includes(position)) {
+      entry.positions.push(position);
     }
   }
 
   srcRegex.lastIndex = 0;
-  let processed = answer.replace(srcRegex, (match, fileName, position) => {
+  let processed = answer.replace(srcRegex, (match, fileName, position, numRef) => {
+    if (numRef) {
+      // [N] format — look up by source index
+      const idx = parseInt(numRef) - 1;
+      if (idx >= 0 && idx < (sources || []).length) {
+        const s = sources[idx];
+        const key = s.file.toLowerCase().trim();
+        const entry = sourceMap.get(key);
+        if (entry && entry.filePath) return `<sup class="citation"><a href="#" data-file-path="${escapeHtmlAttr(entry.filePath)}">[${entry.num}]</a></sup>`;
+        if (entry) return `<sup class="citation">[${entry.num}]</sup>`;
+      }
+      return match;
+    }
+    // [Source: filename] format
     const key = (fileName || '').toLowerCase().trim();
     const entry = sourceMap.get(key);
     if (!entry) return match;

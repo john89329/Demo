@@ -18,10 +18,24 @@ def estimate_tokens(text):
 
 def _split_long_paragraph(para, max_tokens, max_chars=3000):
     """将超长段落按句子或字符切分为小块。"""
-    sentences = re.split(r'(?<=[。！？.!?])', para)
+    sentences = re.split(r'(?<=[。！？!?])', para)
     sentences = [s.strip() for s in sentences if s.strip()]
     if len(sentences) <= 1:
-        return [para[i:i+max_chars] for i in range(0, len(para), max_chars)]
+        lines = para.split('\n')
+        result = []
+        batch, batch_len = [], 0
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            if batch_len + len(line) > max_chars and batch:
+                result.append('\n'.join(batch))
+                batch, batch_len = [], 0
+            batch.append(line)
+            batch_len += len(line)
+        if batch:
+            result.append('\n'.join(batch))
+        return result
 
     result = []
     for i in range(0, len(sentences), 10):
@@ -96,7 +110,10 @@ def chunk_document(parsed_doc, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
 
     # 硬限制：每块不超过 3000 字符（BGE-M3 限 8192 tokens，3000字≈7500t 安全）
     MAX_CHUNK_CHARS = 3000
-    chunks = [c[:MAX_CHUNK_CHARS] for c in chunks]
+    for i, c in enumerate(chunks):
+        if len(c) > MAX_CHUNK_CHARS:
+            cut = c.rfind('\n', 0, MAX_CHUNK_CHARS)
+            chunks[i] = c[:cut if cut > 0 else MAX_CHUNK_CHARS]
 
     if not chunks:
         chunks = [content[:MAX_CHUNK_CHARS]]

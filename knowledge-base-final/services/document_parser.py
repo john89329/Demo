@@ -5,7 +5,7 @@ import shutil
 import traceback
 from collections import namedtuple
 
-from PyPDF2 import PdfReader
+import fitz  # PyMuPDF — text extraction + OCR rendering
 from docx import Document as DocxDocument
 
 ParsedDocument = namedtuple("ParsedDocument", ["file_path", "file_name", "file_type", "content", "pages", "metadata"])
@@ -151,19 +151,24 @@ def parse_pdf(file_path, skip_ocr=False):
     content_parts = []
     pages = []
     ocr_used = False
+    meta = {}
+    text_extracted = False
+
+    # Extract text with PyMuPDF (fitz) — far better for Chinese PDFs than PyPDF2
     try:
-        reader = PdfReader(file_path)
-        for i, page in enumerate(reader.pages):
-            text = page.extract_text() or ""
-            text = text.strip()
+        doc = fitz.open(file_path)
+        for i, page in enumerate(doc):
+            text = page.get_text().strip()
             if text:
                 pages.append(text)
                 content_parts.append(f"--- Page {i + 1} ---\n{text}")
-    except Exception:
-        pass
+                text_extracted = True
+        doc.close()
+    except Exception as e:
+        meta["text_extraction_error"] = str(e)[:200]
 
-    # OCR fallback for scanned PDFs
-    if not pages and not skip_ocr:
+    # OCR fallback for scanned PDFs (no extractable text layer)
+    if not text_extracted and not skip_ocr:
         try:
             from services.ocr_engine import ocr_pdf
             ocr_text = ocr_pdf(file_path)
@@ -171,14 +176,22 @@ def parse_pdf(file_path, skip_ocr=False):
                 pages = [ocr_text]
                 content_parts = [ocr_text]
                 ocr_used = True
-        except Exception:
-            pass
+        except Exception as e:
+            meta["ocr_error"] = str(e)[:200]
 
     if not content_parts:
-        content_parts.append(f"[PDF could not be parsed: {os.path.basename(file_path)}]")
+        if meta.get("ocr_error"):
+            raise RuntimeError(
+                f"OCR 失败: {meta['ocr_error']}"
+            )
+        if meta.get("text_extraction_error"):
+            raise RuntimeError(
+                f"文本提取失败: {meta['text_extraction_error']}"
+            )
+        raise RuntimeError("PDF 无法解析: 无可提取文本层且 OCR 未启用")
 
     content = "\n\n".join(content_parts)
-    meta = {"pages": len(pages)}
+    meta["pages"] = len(pages)
     if ocr_used:
         meta["ocr_used"] = True
     return ParsedDocument(file_path, os.path.basename(file_path), "pdf", content, pages, meta)
@@ -197,12 +210,17 @@ def parse_archive(file_path, **kwargs):
         elif ext == ".rar":
             try:
                 import rarfile
-                with rarfile.RarFile(file_path) as rf:
-                    rf.extractall(temp_dir)
             except ImportError:
                 return ParsedDocument(file_path, os.path.basename(file_path), "archive",
-                                      f"[Archive: {os.path.basename(file_path)} (rarfile not available)]",
+                                      f"[Archive: {os.path.basename(file_path)} (rarfile library not available)]",
                                       [], {"error": "rarfile library not available"})
+            try:
+                with rarfile.RarFile(file_path) as rf:
+                    rf.extractall(temp_dir)
+            except rarfile.RarCannotExec:
+                return ParsedDocument(file_path, os.path.basename(file_path), "archive",
+                                      f"[Archive: {os.path.basename(file_path)} (unrar 工具未安装，无法解压)]",
+                                      [], {"error": "unrar tool not installed"})
 
         for root, dirs, files in os.walk(temp_dir):
             for f in files:

@@ -1,0 +1,2094 @@
+// ==================== APP STATE ====================
+const App = {
+  scannedFiles: [],
+  indexing: false,
+  indexingPoll: null,
+  currentKb: '默认库',
+  libraries: [],
+  indexErrors: { dup: [], parse: [], embed: [] },
+  settings: {
+    api_key: '',
+    embedding_api_key: '',
+    chunk_size: 1024,
+    top_k: 5,
+    theme: 'blue',
+  },
+};
+var state = App;
+
+// ==================== THEME SWITCHING ====================
+function applyTheme(theme) {
+  const t = theme || 'blue';
+  document.documentElement.setAttribute('data-theme', t);
+  // Sync all theme selectors on the page
+  document.querySelectorAll('#themeSelect, #themeSelectModal').forEach(function(sel) {
+    sel.value = t;
+  });
+}
+
+function switchTheme(theme) {
+  state.settings.theme = theme;
+  applyTheme(theme);
+  saveSettingsToLocal();
+}
+
+// ==================== DRAGGABLE PANELS ====================
+function initSplitters() {
+  const sidebar = document.getElementById('sidebar');
+  const sidebarSplitter = document.getElementById('sidebarSplitter');
+  const bottomPanel = document.getElementById('bottomPanel');
+  const bottomSplitter = document.getElementById('bottomSplitter');
+  const mainArea = document.getElementById('mainArea');
+
+  // Sidebar width drag
+  let sideDragging = false;
+  sidebarSplitter.addEventListener('mousedown', (e) => {
+    sideDragging = true;
+    sidebarSplitter.classList.add('active');
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!sideDragging) return;
+    const w = Math.max(240, Math.min(500, e.clientX));
+    sidebar.style.width = w + 'px';
+    sidebar.style.minWidth = w + 'px';
+    sidebar.style.maxWidth = w + 'px';
+    localStorage.setItem('sidebar_width', w);
+  });
+  document.addEventListener('mouseup', () => {
+    if (sideDragging) {
+      sideDragging = false;
+      sidebarSplitter.classList.remove('active');
+      document.body.style.cursor = '';
+    }
+  });
+
+  // Bottom panel height drag
+  let bottomDragging = false;
+  let bottomStartY = 0, bottomStartH = 0;
+  bottomSplitter.addEventListener('mousedown', (e) => {
+    bottomDragging = true;
+    bottomStartY = e.clientY;
+    bottomStartH = bottomPanel.offsetHeight;
+    bottomSplitter.classList.add('active');
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!bottomDragging) return;
+    const mainRect = mainArea.getBoundingClientRect();
+    const maxH = mainRect.height * 0.5;
+    const newH = Math.max(100, Math.min(maxH, bottomStartH + (bottomStartY - e.clientY)));
+    bottomPanel.style.height = newH + 'px';
+    bottomPanel.style.minHeight = newH + 'px';
+    localStorage.setItem('bottom_panel_h', Math.round(newH));
+  });
+  document.addEventListener('mouseup', () => {
+    if (bottomDragging) {
+      bottomDragging = false;
+      bottomSplitter.classList.remove('active');
+      document.body.style.cursor = '';
+    }
+  });
+
+  // Restore sizes
+  const savedSidebar = localStorage.getItem('sidebar_width');
+  if (savedSidebar) {
+    const w = parseInt(savedSidebar);
+    if (w >= 240 && w <= 500) {
+      sidebar.style.width = w + 'px';
+      sidebar.style.minWidth = w + 'px';
+      sidebar.style.maxWidth = w + 'px';
+    }
+  }
+  const savedBottom = localStorage.getItem('bottom_panel_h');
+  if (savedBottom) {
+    const h = parseInt(savedBottom);
+    if (h >= 100) {
+      bottomPanel.style.height = h + 'px';
+      bottomPanel.style.minHeight = h + 'px';
+    }
+  }
+
+  // Session panel width drag
+  const sessionPanel = document.getElementById('sessionPanel');
+  const sessionSplitter = document.getElementById('sessionSplitter');
+  if (sessionSplitter && sessionPanel) {
+    let sessDragging = false;
+    sessionSplitter.addEventListener('mousedown', (e) => {
+      sessDragging = true;
+      sessionSplitter.classList.add('active');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', (e) => {
+      if (!sessDragging) return;
+      const mainRect = mainArea.getBoundingClientRect();
+      const rightEdge = mainRect.right;
+      const w = Math.max(200, Math.min(400, rightEdge - e.clientX));
+      sessionPanel.style.width = w + 'px';
+      sessionPanel.style.minWidth = w + 'px';
+      sessionPanel.style.maxWidth = w + 'px';
+      localStorage.setItem('session_panel_w', w);
+    });
+    document.addEventListener('mouseup', () => {
+      if (sessDragging) {
+        sessDragging = false;
+        sessionSplitter.classList.remove('active');
+        document.body.style.cursor = '';
+      }
+    });
+    // Restore session panel width
+    const savedSP = localStorage.getItem('session_panel_w');
+    if (savedSP) {
+      const w = parseInt(savedSP);
+      if (w >= 200 && w <= 400) {
+        sessionPanel.style.width = w + 'px';
+        sessionPanel.style.minWidth = w + 'px';
+        sessionPanel.style.maxWidth = w + 'px';
+      }
+    }
+  }
+}
+
+// ==================== ERROR PANEL ====================
+function renderErrors() {
+  const all = [
+    ...state.indexErrors.dup.map(e => ({ ...e, cat: 'dup' })),
+    ...state.indexErrors.parse.map(e => ({ ...e, cat: 'parse' })),
+    ...state.indexErrors.embed.map(e => ({ ...e, cat: 'embed' })),
+  ];
+
+  document.getElementById('badgeDup').textContent = state.indexErrors.dup.length;
+  document.getElementById('badgeParse').textContent = state.indexErrors.parse.length;
+  document.getElementById('badgeEmbed').textContent = state.indexErrors.embed.length;
+
+  const okCount = document.getElementById('badgeOk');
+  okCount.style.display = all.length === 0 ? 'none' : 'inline';
+  // Count completed ok files from the file list
+  const okFiles = document.querySelectorAll('#fileList .status-dot.ok').length;
+  okCount.textContent = '完成 ' + okFiles;
+
+  const activeCat = document.querySelector('.error-tab.active')?.dataset?.cat || 'all';
+  const filtered = activeCat === 'all' ? all : all.filter(e => e.cat === activeCat);
+
+  const el = document.getElementById('errorList');
+  if (filtered.length === 0) {
+    el.innerHTML = '<div class="empty-panel">✅ 暂无此类错误</div>';
+    return;
+  }
+
+  const catLabel = { dup: '重复', parse: '解析', embed: '嵌入' };
+  const icons = { dup: '🔄', parse: '❌', embed: '⬆️' };
+
+  el.innerHTML = filtered.map((e, i) => `
+    <div class="error-item ${e.cat}">
+      <span class="err-icon">${icons[e.cat]}</span>
+      <div class="err-info">
+        <span class="err-file" onclick="openFile('${escapeHtmlAttr(e.path || '')}')" title="${escapeHtmlAttr(e.path || '')}">${escapeHtml(e.file || '')}</span>
+        <span style="font-size:11px;color:var(--text-muted);margin-left:8px;">[${catLabel[e.cat]}]</span>
+        <div class="err-msg">${escapeHtml(e.message || '')}</div>
+      </div>
+      <div class="err-actions">
+        ${e.cat !== 'dup' ? `<button class="btn btn-outline btn-xs" onclick="retryFile('${escapeHtmlAttr(e.path || '')}', '${escapeHtmlAttr(e.cat)}')" title="重新解析">🔄 重试</button>` : ''}
+        <button class="btn btn-outline btn-xs" onclick="removeFileIndex('${escapeHtmlAttr(e.path || '')}')" title="删除该文件的索引记录" style="color:var(--danger);">🗑️ 删除索引</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function filterErrors(cat) {
+  document.querySelectorAll('.error-tab').forEach(t => t.classList.toggle('active', t.dataset.cat === cat));
+  renderErrors();
+}
+
+function clearErrors() {
+  if (!confirm('确定清除所有错误记录？')) return;
+  state.indexErrors = { dup: [], parse: [], embed: [] };
+  renderErrors();
+}
+
+function addErrors(errors) {
+  if (!errors || !errors.length) return;
+  // Dedup: build set of existing keys to avoid duplicates from repeated polling.
+  // Use composite key: type|path|message — so errors without path still get deduped,
+  // and different error types for the same file are kept separate.
+  const seen = new Set();
+  for (const cat of ['dup', 'parse', 'embed']) {
+    for (const e of state.indexErrors[cat]) {
+      const t = e.type || '';
+      const key = t + '|' + (e.path || '') + '|' + (e.message || e.file || '');
+      seen.add(key);
+    }
+  }
+  errors.forEach(e => {
+    const type = e.type || '';
+    const key = type + '|' + (e.path || '') + '|' + (e.message || e.file || '');
+    if (seen.has(key)) return;
+    seen.add(key);
+
+    if (type === 'parse_error' || type === 'parse') {
+      state.indexErrors.parse.push(e);
+    } else if (type === 'embed_error' || type === 'embed') {
+      state.indexErrors.embed.push(e);
+    } else if (type === 'duplicate' || type === 'dup') {
+      state.indexErrors.dup.push(e);
+    } else {
+      state.indexErrors.parse.push({ ...e, type: 'parse_error' });
+    }
+  });
+  renderErrors();
+}
+
+async function retryFile(filePath, cat) {
+  if (!filePath) return;
+  if (!state.settings.api_key) {
+    showToast('请先配置 API 密钥', 'error');
+    openSettings();
+    return;
+  }
+  showLoading('重新解析中...');
+  try {
+    const res = await fetch('/api/kb/retry-file', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        file_path: filePath,
+        api_key: state.settings.api_key,
+        embedding_api_key: state.settings.embedding_api_key,
+        kb_name: state.currentKb,
+      }),
+    });
+    const data = await res.json();
+    hideLoading();
+    if (data.success) {
+      showToast('文件重新解析成功！', 'success');
+      // 移除对应错误
+      if (cat === 'parse') state.indexErrors.parse = state.indexErrors.parse.filter(e => e.path !== filePath);
+      else if (cat === 'embed') state.indexErrors.embed = state.indexErrors.embed.filter(e => e.path !== filePath);
+      else state.indexErrors.dup = state.indexErrors.dup.filter(e => e.path !== filePath);
+      renderErrors();
+      refreshStatus();
+      renderFailedFiles();  // refresh failed list after retry
+    } else {
+      showToast(data.error || '重新解析失败', 'error');
+    }
+  } catch(e) {
+    hideLoading();
+    showToast('重新解析失败: ' + e.message, 'error');
+  }
+}
+
+async function renderFailedFiles() {
+  try {
+    const res = await fetch('/api/kb/failed-files?' + kbQuery());
+    const data = await res.json();
+    if (!data.success || data.data.total === 0) return;
+
+    const d = data.data;
+    const catMap = { parse_error: 'parse', embed_error: 'embed', duplicate: 'dup', cancelled: 'parse' };
+
+    // Convert persisted failed files into state.indexErrors format so they
+    // appear in the bottom «索引结果» panel alongside live polling errors.
+    for (const [group, files] of Object.entries(d.groups || {})) {
+      const cat = catMap[group] || 'parse';
+      for (const f of files) {
+        const entry = {
+          cat: cat,
+          type: group,
+          path: f.path || '',
+          file: f.name || (f.path || '').split(/[\\/]/).pop(),
+          message: f.error || group,
+        };
+        // Avoid duplicates with live errors already in state
+        const exists = state.indexErrors[cat].some(e => e.path === entry.path && e.type === entry.type);
+        if (!exists) {
+          state.indexErrors[cat].push(entry);
+        }
+      }
+    }
+    renderErrors();
+  } catch(e) {}
+}
+
+async function cancelFileIndex(fileIndex) {
+  if (!state.indexing) return;
+  try {
+    const res = await fetch('/api/kb/cancel-file', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ file_index: fileIndex, kb_name: state.currentKb }),
+    });
+    const data = await res.json();
+    if (data.success) {
+      showToast(`已标记文件取消`, 'success');
+    } else {
+      showToast(data.error || '取消失败', 'error');
+    }
+  } catch(e) {
+    showToast('取消失败: ' + e.message, 'error');
+  }
+}
+
+async function removeFileIndex(filePath) {
+  if (!filePath) return;
+  if (!confirm(`确定删除该文件的索引记录？\n\n文件: ${filePath}\n\n这将从索引数据库中移除该文件的所有文本块，但不删除原始文件。删除后可重新扫描并索引。`)) return;
+  showLoading('删除索引记录...');
+  try {
+    const res = await fetch('/api/kb/remove-file', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        file_path: filePath,
+        kb_name: state.currentKb,
+      }),
+    });
+    const data = await res.json();
+    hideLoading();
+    if (data.success) {
+      showToast('索引记录已删除，可重新扫描索引', 'success');
+      // 清除该文件相关的所有错误
+      state.indexErrors.dup = state.indexErrors.dup.filter(e => e.path !== filePath);
+      state.indexErrors.parse = state.indexErrors.parse.filter(e => e.path !== filePath);
+      state.indexErrors.embed = state.indexErrors.embed.filter(e => e.path !== filePath);
+      renderErrors();
+      refreshStatus();
+    } else {
+      showToast(data.error || '删除失败', 'error');
+    }
+  } catch(e) {
+    hideLoading();
+    showToast('删除失败: ' + e.message, 'error');
+  }
+}
+
+// ==================== FILE SEARCH ====================
+async function doFileSearch() {
+  const query = document.getElementById('searchInput').value.trim();
+  if (!query) { showToast('请输入搜索关键字', 'error'); return; }
+  if (!state.settings.api_key) {
+    showToast('请先配置 API 密钥', 'error');
+    openSettings();
+    return;
+  }
+
+  const mode = document.querySelector('input[name="searchMode"]:checked')?.value || 'keyword';
+  const resultsEl = document.getElementById('searchResults');
+  const statsEl = document.getElementById('searchStats');
+
+  resultsEl.innerHTML = '<div style="text-align:center;padding:40px;"><div class="spinner"></div><p style="margin-top:12px;color:var(--text-muted);">搜索中...</p></div>';
+
+  try {
+    const res = await fetch('/api/kb/search', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        query: query,
+        mode: mode === 'fuzzy' ? 'hybrid' : 'keyword',
+        top_k: 50,
+        kb_name: state.currentKb,
+        api_key: state.settings.api_key,
+        embedding_api_key: state.settings.embedding_api_key,
+      }),
+    });
+    const data = await res.json();
+    if (data.success && data.data) {
+      const results = data.data.results || [];
+      statsEl.textContent = `找到 ${results.length} 条结果 (${data.data.mode || mode})`;
+
+      // 按文件分组
+      const byFile = {};
+      results.forEach(r => {
+        const f = r.source_file || '未知文件';
+        if (!byFile[f]) byFile[f] = [];
+        byFile[f].push(r);
+      });
+
+      if (Object.keys(byFile).length === 0) {
+        resultsEl.innerHTML = '<div class="search-empty"><div style="font-size:40px;opacity:.2;margin-bottom:8px;">📭</div><p>未找到匹配的内容</p></div>';
+        return;
+      }
+
+      // 高亮关键字
+      const kw = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp(`(${kw})`, 'gi');
+
+      resultsEl.innerHTML = Object.entries(byFile).map(([file, chunks]) => {
+        const icon = getFileIcon(file);
+        const firstChunk = chunks[0] || {};
+        const filePath = firstChunk.source_file || file;
+        return `
+          <div class="search-result-card">
+            <div class="sr-header">
+              <span>${icon}</span>
+              <span class="sr-file" onclick="openFile('${escapeHtmlAttr(filePath)}')" title="${escapeHtmlAttr(filePath)}">${escapeHtml(file)}</span>
+              <span class="sr-meta">${chunks.length} 处匹配</span>
+            </div>
+            ${chunks.slice(0, 3).map((c, i) => `
+              <div class="sr-content" style="margin-bottom:${i < chunks.slice(0, 3).length - 1 ? '8' : '0'}px;">
+                <span style="font-size:11px;color:var(--text-muted);">片段 ${c.chunk_index || i + 1}:</span>
+                ${highlightText(c.text || '', re)}
+              </div>
+            `).join('')}
+            ${chunks.length > 3 ? `<div style="font-size:12px;color:var(--text-muted);margin-top:4px;">... 还有 ${chunks.length - 3} 处匹配</div>` : ''}
+          </div>
+        `;
+      }).join('');
+    } else {
+      resultsEl.innerHTML = `<div class="search-empty">❌ ${data.error || '搜索失败'}</div>`;
+      statsEl.textContent = '';
+    }
+  } catch(e) {
+    resultsEl.innerHTML = `<div class="search-empty">❌ 搜索出错: ${e.message}</div>`;
+    statsEl.textContent = '';
+  }
+}
+
+function getFileIcon(file) {
+  const ext = (file || '').split('.').pop().toLowerCase();
+  const map = { pdf: '📄', docx: '📝', doc: '📝', xlsx: '📊', xls: '📊', vsdx: '📐', pptx: '📽️', ppt: '📽️', png: '🖼️', jpg: '🖼️', jpeg: '🖼️', bmp: '🖼️', tiff: '🖼️', tif: '🖼️', zip: '📦', rar: '🗜️', dxf: '📐', txt: '📃', csv: '📊', md: '📝' };
+  return map[ext] || '📄';
+}
+
+function highlightText(text, regex) {
+  return (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(regex, '<mark>$1</mark>');
+}
+
+// ==================== LIBRARY MANAGEMENT ====================
+async function loadLibraries() {
+  try {
+    const res = await fetch('/api/kb/libraries');
+    const data = await res.json();
+    if (data.success) {
+      state.libraries = data.data.libraries;
+      const saved = localStorage.getItem('kb_current');
+      if (saved && state.libraries.includes(saved)) {
+        state.currentKb = saved;
+      } else {
+        state.currentKb = data.data.current;
+      }
+      if (state.currentKb !== data.data.current) {
+        await fetch('/api/kb/libraries/switch', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({name: state.currentKb}),
+        });
+      }
+      renderLibrarySelect();
+    }
+  } catch(e) {}
+}
+
+function renderLibrarySelect() {
+  const sel = document.getElementById('librarySelect');
+  sel.innerHTML = state.libraries.map(name =>
+    `<option value="${name}" ${name === state.currentKb ? 'selected' : ''}>${name}</option>`
+  ).join('');
+}
+
+async function switchLibrary(name) {
+  if (name === state.currentKb) return;
+  try {
+    const res = await fetch('/api/kb/libraries/switch', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name}),
+    });
+    const data = await res.json();
+    if (data.success) {
+      state.currentKb = name;
+      localStorage.setItem('kb_current', name);
+      renderLibrarySelect();
+      showToast(`已切换到「${name}」`, 'success');
+      refreshStatus();
+      document.getElementById('chatMessages').innerHTML = '<div class="chat-empty"><div class="icon">💬</div><p>向知识库提问，获取基于文档的答案</p></div>';
+      loadChatHistory();
+    } else {
+      showToast(data.error, 'error');
+    }
+  } catch(e) {
+    showToast('切换失败: ' + e.message, 'error');
+  }
+}
+
+async function promptCreateLibrary() {
+  const name = prompt('请输入新知识库名称：');
+  if (!name || !name.trim()) return;
+  try {
+    const res = await fetch('/api/kb/libraries/create', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: name.trim()}),
+    });
+    const data = await res.json();
+    if (data.success) {
+      state.libraries = data.data.libraries;
+      state.currentKb = name.trim();
+      localStorage.setItem('kb_current', state.currentKb);
+      renderLibrarySelect();
+      showToast(`知识库「${name}」已创建`, 'success');
+      refreshStatus();
+    } else {
+      showToast(data.error, 'error');
+    }
+  } catch(e) {
+    showToast('创建失败: ' + e.message, 'error');
+  }
+}
+
+async function promptDeleteLibrary() {
+  if (state.libraries.length <= 1) {
+    showToast('至少保留一个知识库', 'error');
+    return;
+  }
+  if (!confirm(`确定删除知识库「${state.currentKb}」？所有索引数据将被永久删除。`)) return;
+  try {
+    const res = await fetch('/api/kb/libraries/delete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: state.currentKb}),
+    });
+    const data = await res.json();
+    if (data.success) {
+      state.libraries = data.data.libraries;
+      state.currentKb = data.data.current;
+      localStorage.setItem('kb_current', state.currentKb);
+      renderLibrarySelect();
+      showToast('知识库已删除', 'success');
+      refreshStatus();
+    } else {
+      showToast(data.error, 'error');
+    }
+  } catch(e) {
+    showToast('删除失败: ' + e.message, 'error');
+  }
+}
+
+function kbQuery() {
+  return 'kb_name=' + encodeURIComponent(state.currentKb);
+}
+
+// ==================== SESSION PANEL STATE ====================
+function restoreSessionPanelState() {
+  const panel = document.getElementById('sessionPanel');
+  const toggleBtn = document.getElementById('sessionToggleBtn');
+  if (!panel) return;
+  const collapsed = localStorage.getItem('session_panel_collapsed') === '1';
+  if (collapsed) {
+    panel.classList.add('collapsed');
+    toggleBtn && toggleBtn.classList.add('show');
+  } else {
+    panel.classList.remove('collapsed');
+    toggleBtn && toggleBtn.classList.remove('show');
+  }
+}
+
+// ==================== INIT ====================
+async function init() {
+  loadSettings();
+  await loadLibraries();
+  refreshStatus();
+  renderTemplates();
+  setupChatInput();
+  initSplitters();
+  loadChatHistory();
+}
+
+async function loadSessions() {
+  try {
+    const kb = state.currentKb || 'default';
+    let resp = await fetch('/api/kb/audit-log?kb_name=' + encodeURIComponent(kb));
+    let data = await resp.json();
+    let sessions = (data.success && data.data && data.data.sessions) ? data.data.sessions : [];
+
+    // Auto-create default session if none exist
+    if (sessions.length === 0) {
+      resp = await fetch('/api/kb/session/new', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({topic: '默认会话', kb_name: kb}),
+      });
+      data = await resp.json();
+      resp = await fetch('/api/kb/audit-log?kb_name=' + encodeURIComponent(kb));
+      data = await resp.json();
+      sessions = (data.success && data.data && data.data.sessions) ? data.data.sessions : [];
+    }
+
+    // Find active session
+    const activeSession = sessions.find(s => s.active);
+    if (activeSession) {
+      state.activeSessionId = activeSession.session_id;
+    } else if (sessions.length > 0) {
+      state.activeSessionId = sessions[0].session_id;
+    }
+    state._cachedSessions = sessions;
+    return sessions;
+  } catch(e) { console.error('loadSessions error:', e); return []; }
+}
+
+function getActiveSessionId() {
+  return state.activeSessionId || '';
+}
+
+async function loadSidebarSessions() {
+  const sessions = await loadSessions();
+  const list = document.getElementById('sessionList');
+  if (!list) return;
+  const activeId = getActiveSessionId();
+
+  list.innerHTML = sessions.map(s => {
+    const title = s.topic || '新会话';
+    const date = new Date(s.start_time).toLocaleDateString();
+    const active = s.session_id === activeId ? ' active' : '';
+    return `<div class="session-item${active}" data-sid="${s.session_id}" onclick="switchSidebarSession('${s.session_id}')">
+      <span class="sess-title">${escapeHtml(title)}</span>
+      <span class="sess-date">${date}</span>
+      <span class="sess-del" onclick="event.stopPropagation();deleteSidebarSession('${s.session_id}')">&times;</span>
+    </div>`;
+  }).join('');
+}
+
+async function switchSidebarSession(id) {
+  if (!id || id === state.activeSessionId) return;
+  const kb = state.currentKb || 'default';
+  await fetch('/api/kb/session/switch', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({session_id: id, kb_name: kb}),
+  });
+  state.activeSessionId = id;
+  loadSidebarSessions();
+  loadChatHistory();
+}
+
+async function deleteSidebarSession(id) {
+  if (!id) return;
+  const session = (state._cachedSessions || []).find(s => s.session_id === id);
+  const label = session ? (session.topic || '新会话') : id.slice(0, 8);
+  if (!confirm(`确定删除会话「${label}」？`)) return;
+  const kb = state.currentKb || 'default';
+  await fetch('/api/kb/session/delete', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({session_id: id, kb_name: kb}),
+  });
+  if (state.activeSessionId === id) {
+    state.activeSessionId = '';
+  }
+  await loadSidebarSessions();
+  loadChatHistory();
+}
+
+function toggleSessionPanel() {
+  const panel = document.getElementById('sessionPanel');
+  const toggleBtn = document.getElementById('sessionToggleBtn');
+  const collapsed = panel.classList.toggle('collapsed');
+  if (collapsed) {
+    toggleBtn.classList.add('show');
+    localStorage.setItem('session_panel_collapsed', '1');
+  } else {
+    toggleBtn.classList.remove('show');
+    localStorage.setItem('session_panel_collapsed', '0');
+  }
+  // Force re-layout
+  setTimeout(() => {
+    const container = document.getElementById('chatMessages');
+    if (container) container.scrollTop = container.scrollHeight;
+  }, 250);
+}
+
+async function newSession() {
+  try {
+    const kb = state.currentKb || 'default';
+    const resp = await fetch('/api/kb/session/new', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({topic: '', kb_name: kb}),
+    });
+    const data = await resp.json();
+    if (data.success) {
+      state.activeSessionId = data.data.session_id;
+      await loadSidebarSessions();
+      document.getElementById('chatMessages').innerHTML = '<div class="chat-empty"><div class="icon">💬</div><p>新会话已创建</p></div>';
+    }
+  } catch(e) { console.error('newSession error:', e); }
+}
+
+async function loadChatHistory() {
+  try {
+    await loadSessions();
+    await loadSidebarSessions();
+    restoreSessionPanelState();
+    const kb = state.currentKb || 'default';
+    const sid = getActiveSessionId();
+    if (!sid) return;
+    const url = '/api/kb/audit-log?kb_name=' + encodeURIComponent(kb) + '&session_id=' + encodeURIComponent(sid);
+    const resp = await fetch(url);
+    const data = await resp.json();
+    let messages = [];
+    if (data.success && data.data && data.data.sessions) {
+      const session = data.data.sessions[0];
+      messages = (session.turns || []).map(t => ({role: t.role, content: t.content, sources: t.sources || []}));
+    }
+    if (messages.length > 0) {
+      const container = document.getElementById('chatMessages');
+      const empty = container.querySelector('.chat-empty');
+      if (empty) empty.remove();
+      container.innerHTML = '';
+      messages.forEach(msg => {
+        if (msg.role === 'assistant') {
+          addAssistantMessage(msg.content, msg.sources || []);
+        } else {
+          addMessage(msg.role, msg.content);
+        }
+      });
+      container.scrollTop = container.scrollHeight;
+    }
+  } catch(e) {}
+}
+
+function loadSettings() {
+  try {
+    const s = localStorage.getItem('kb_settings');
+    if (s) Object.assign(state.settings, JSON.parse(s));
+    document.getElementById('apiKeyInput').value = state.settings.api_key || '';
+    document.getElementById('embeddingKeyInput').value = state.settings.embedding_api_key || '';
+    document.getElementById('chunkSizeInput').value = state.settings.chunk_size || 512;
+    document.getElementById('topKInput').value = state.settings.top_k || 5;
+    const themeModal = document.getElementById('themeSelectModal');
+    if (themeModal) themeModal.value = state.settings.theme || 'blue';
+  } catch(e) {}
+  applyTheme(state.settings.theme || 'blue');
+  updateApiStatus();
+}
+
+function saveSettingsToLocal() {
+  localStorage.setItem('kb_settings', JSON.stringify(state.settings));
+}
+
+function updateApiStatus() {
+  const el = document.getElementById('apiStatus');
+  if (state.settings.api_key) {
+    el.textContent = 'API: ' + state.settings.api_key.slice(0, 6) + '...';
+    el.className = 'status-badge ok';
+  } else {
+    el.textContent = 'API 未配置';
+    el.className = 'status-badge err';
+  }
+}
+
+// ==================== TABS ====================
+function switchTab(tab) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  document.querySelectorAll('.tab-content').forEach(t => {
+    const idMap = { chat: 'tabChat', material: 'tabMaterial', search: 'tabSearch', analysis: 'tabAnalysis' };
+    t.classList.toggle('active', t.id === idMap[tab]);
+  });
+  if (tab === 'analysis') { loadAnalysisFileList(); }
+}
+
+// ==================== SCAN ====================
+async function scanDir() {
+  const path = document.getElementById('dirInput').value.trim();
+  if (!path) { showToast('请输入文档目录路径', 'error'); return; }
+  showLoading('扫描目录中...');
+  try {
+    const res = await fetch('/api/kb/scan', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({path}),
+    });
+    const data = await res.json();
+    hideLoading();
+    if (data.success) {
+      state.scannedFiles = data.data.files;
+      showToast(`找到 ${data.data.count} 个文件`, 'success');
+      updateFileList(data.data.files);
+    } else {
+      showToast(data.error, 'error');
+    }
+  } catch(e) {
+    hideLoading();
+    showToast('扫描失败: ' + e.message, 'error');
+  }
+}
+
+function updateFileList(files) {
+  const el = document.getElementById('fileList');
+  if (!files || files.length === 0) {
+    el.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-muted);font-size:13px;">暂无文件</div>';
+    return;
+  }
+  const iconMap = { '.docx':'📝','.xlsx':'📊','.pdf':'📄','.vsdx':'📐','.zip':'📦','.rar':'🗜️' };
+  el.innerHTML = files.map(f =>
+    `<div class="file-item" data-file-path="${escapeHtmlAttr(f.path)}" style="cursor:pointer;">
+      <span class="icon">${iconMap[f.ext] || '📄'}</span>
+      <span class="name" title="${escapeHtmlAttr(f.path)}">${escapeHtml(f.name)}</span>
+      <span class="size">${f.size_str || ''}</span>
+      <span class="status-dot wait"></span>
+    </div>`
+  ).join('');
+}
+
+// ==================== INDEX ====================
+async function promptStartIndex() {
+  const msg = '请选择索引模式:\n\n"确定" = 增量索引（追加新文件）\n"取消" = 完整重建（清除后重建）';
+  if (confirm(msg)) {
+    await startIndex();
+  } else {
+    await rebuildIndex();
+  }
+}
+
+async function rebuildIndex() {
+  if (state.scannedFiles.length === 0) { showToast('请先扫描目录', 'error'); return; }
+  if (!confirm(`确定重新构建索引？将清除现有 ${state.scannedFiles.length} 个文件的索引后重建。`)) return;
+  if (state.indexing) { showToast('正在索引中...', 'error'); return; }
+  if (!state.settings.api_key) { showToast('请先配置 API 密钥', 'error'); openSettings(); return; }
+
+  state.indexErrors = { dup: [], parse: [], embed: [] };
+  renderErrors();
+
+  state.indexing = true;
+  showLoading('清除旧索引...');
+  try {
+    await fetch('/api/kb/clear', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({kb_name: state.currentKb}),
+    });
+  } catch(e) {}
+
+  const pb = document.getElementById('progressBar');
+  pb.style.display = 'block';
+  document.getElementById('indexStatus').textContent = '开始重建...';
+  document.getElementById('indexStatsPanel').style.display = '';
+  document.getElementById('idxTotal').textContent = files.length;
+  document.getElementById('idxDup').textContent = document.getElementById('idxParsed').textContent = document.getElementById('idxEmbedded').textContent = document.getElementById('idxActive').textContent = document.getElementById('idxErrors').textContent = '0';
+
+  hideLoading();
+  showLoading(`正在重建 ${state.scannedFiles.length} 个文件...`);
+  try {
+    const res = await fetch('/api/kb/index', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        files: state.scannedFiles.map(f => f.path),
+        api_key: state.settings.api_key,
+        embedding_api_key: state.settings.embedding_api_key,
+        kb_name: state.currentKb,
+      }),
+    });
+    const data = await res.json();
+    hideLoading();
+    if (data.success) {
+      showToast(`正在重建 ${state.scannedFiles.length} 个文件`, 'success');
+      state.indexingPoll = setInterval(pollIndexStatus, 1000);
+    } else {
+      showToast(data.error, 'error');
+      state.indexing = false;
+      pb.style.display = 'none';
+    }
+  } catch(e) {
+    hideLoading();
+    showToast('重建失败: ' + e.message, 'error');
+    state.indexing = false;
+    pb.style.display = 'none';
+  }
+}
+
+async function startIndex() {
+  if (state.scannedFiles.length === 0) { showToast('请先扫描目录', 'error'); return; }
+  if (state.indexing) { showToast('正在索引中...', 'error'); return; }
+  if (!state.settings.api_key) { showToast('请先配置 API 密钥', 'error'); openSettings(); return; }
+
+  state.indexErrors = { dup: [], parse: [], embed: [] };
+  renderErrors();
+
+  state.indexing = true;
+  const pb = document.getElementById('progressBar');
+  pb.style.display = 'block';
+  document.getElementById('indexStatus').textContent = '检查已索引文件...';
+
+  let newFiles;
+  try {
+    const statusRes = await fetch('/api/kb/files?' + kbQuery());
+    const statusData = await statusRes.json();
+    if (statusData.success && statusData.data.files.length > 0) {
+      const indexedPaths = new Set(statusData.data.files.map(f => f.path));
+      newFiles = state.scannedFiles.filter(f => !indexedPaths.has(f.path));
+    } else {
+      newFiles = [...state.scannedFiles];
+    }
+  } catch(e) {
+    newFiles = [...state.scannedFiles];
+  }
+
+  if (newFiles.length === 0) {
+    showToast('所有文件均已索引', 'success');
+    state.indexing = false;
+    pb.style.display = 'none';
+    return;
+  }
+
+  showLoading(`发现 ${newFiles.length} 个新文件，开始构建...`);
+  try {
+    const res = await fetch('/api/kb/index', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        files: newFiles.map(f => f.path),
+        api_key: state.settings.api_key,
+        embedding_api_key: state.settings.embedding_api_key,
+        kb_name: state.currentKb,
+      }),
+    });
+    const data = await res.json();
+    hideLoading();
+    if (data.success) {
+      showToast(`正在索引 ${newFiles.length} 个新文件`, 'success');
+      state.indexingPoll = setInterval(pollIndexStatus, 1000);
+    } else {
+      showToast(data.error, 'error');
+      state.indexing = false;
+      pb.style.display = 'none';
+    }
+  } catch(e) {
+    hideLoading();
+    showToast('启动索引失败: ' + e.message, 'error');
+    state.indexing = false;
+    pb.style.display = 'none';
+  }
+}
+
+async function stopIndexing() {
+  if (!confirm('确定停止正在进行的索引任务？已处理的部分不会丢失。')) return;
+  try {
+    const res = await fetch('/api/kb/stop-indexing', { method: 'POST' });
+    const data = await res.json();
+    if (data.success) {
+      showToast('已发送停止信号，当前批次完成后将停止', 'success');
+      document.getElementById('stopBtn').style.display = 'none';
+    } else {
+      showToast(data.error || '停止失败', 'error');
+    }
+  } catch(e) {
+    showToast('停止失败: ' + e.message, 'error');
+  }
+}
+
+async function pollIndexStatus() {
+  try {
+    const res = await fetch('/api/kb/indexing-status');
+    const data = await res.json();
+    if (!data.success) return;
+
+    const st = data.data;
+    const pf = document.getElementById('progressFill');
+    const stEl = document.getElementById('indexStatus');
+
+    if (st.total > 0) pf.style.width = (st.current / st.total * 100) + '%';
+    stEl.textContent = st.progress || '';
+
+    // 更新索引进度统计面板
+    if (st.running || (st.file_statuses && st.file_statuses.length > 0)) {
+      updateIndexStats(st);
+    }
+
+    // 显示/隐藏停止按钮
+    document.getElementById('stopBtn').style.display = st.running ? '' : 'none';
+
+    // 更新错误分类
+    if (st.errors && st.errors.length > 0) {
+      addErrors(st.errors);
+    }
+
+    // 渲染文件级进度面板
+    renderFileProgress(st);
+
+    if (!st.running) {
+      clearInterval(state.indexingPoll);
+      state.indexingPoll = null;
+      state.indexing = false;
+      document.getElementById('progressBar').style.display = 'none';
+      document.getElementById('stopBtn').style.display = 'none';
+      document.getElementById('fileProgressPanel').style.display = 'none';
+      // 完成后保留统计面板，更新最终数字
+      if (st.file_statuses && st.file_statuses.length > 0) updateIndexStats(st);
+
+      // Render failed files panel
+      renderFailedFiles();
+
+      const totalErrors = state.indexErrors.dup.length + state.indexErrors.parse.length + state.indexErrors.embed.length;
+      if (totalErrors > 0) {
+        stEl.textContent = `完成，${totalErrors} 个错误 (详见下方面板)`;
+        showToast(`索引完成，有 ${totalErrors} 个错误`, 'error');
+      } else {
+        stEl.textContent = '索引构建完成！';
+        showToast('索引构建完成！', 'success');
+      }
+      refreshStatus();
+      loadChatHistory();
+    }
+  } catch(e) {}
+}
+
+function updateIndexStats(st) {
+  const panel = document.getElementById('indexStatsPanel');
+  const fss = st.file_statuses || [];
+  if (!st.running && fss.length === 0) { panel.style.display = 'none'; return; }
+  panel.style.display = '';
+
+  let dup = 0, parsed = 0, embedded = 0, error = 0, active = 0;
+  fss.forEach(f => {
+    switch (f.status) {
+      case 'duplicate': dup++; break;
+      case 'parsed': parsed++; break;
+      case 'embedded': embedded++; break;
+      case 'error': error++; break;
+      case 'parsing': case 'embedding': active++; break;
+    }
+  });
+  document.getElementById('idxTotal').textContent = st.total || fss.length;
+  document.getElementById('idxDup').textContent = dup;
+  document.getElementById('idxParsed').textContent = parsed;
+  document.getElementById('idxEmbedded').textContent = embedded;
+  document.getElementById('idxActive').textContent = active;
+  document.getElementById('idxErrors').textContent = error;
+}
+
+function renderFileProgress(st) {
+  const panel = document.getElementById('fileProgressPanel');
+  const fss = st.file_statuses;
+  if (!fss || fss.length === 0) {
+    panel.style.display = 'none';
+    return;
+  }
+  panel.style.display = 'block';
+
+  const statusLabel = {
+    pending: '⏳ 等待',
+    parsing: '🔄 解析中',
+    parsed: '📝 已解析',
+    embedding: '⬆️ 嵌入中',
+    embedded: '✅ 完成',
+    error: '❌ 失败',
+    duplicate: '⏭️ 跳过',
+    cancelling: '🚫 取消中',
+    cancelled: '🚫 已取消',
+  };
+
+  const total = fss.length;
+  const done = fss.filter(f => f.status === 'embedded').length;
+  const failed = fss.filter(f => f.status === 'error').length;
+  const cancelled = fss.filter(f => f.status === 'cancelled' || f.status === 'cancelling').length;
+  const processing = fss.filter(f => f.status === 'parsing' || f.status === 'embedding').length;
+
+  let html = `<div style="padding:6px 8px;font-size:11px;color:var(--text-muted);display:flex;justify-content:space-between;">
+    <span>📋 文件进度 (${done}/${total}${failed > 0 ? `, ${failed} 失败` : ''}${cancelled > 0 ? `, ${cancelled} 已取消` : ''}${processing > 0 ? `, ${processing} 进行中` : ''})</span>
+  </div>`;
+
+  for (let idx = 0; idx < fss.length; idx++) {
+    const fs = fss[idx];
+    const st = fs.status || 'pending';
+    const name = fs.name || fs.path || '未知';
+    const fp = fs.path || '';
+    const chunks = fs.chunks ? `${fs.chunks}块` : '';
+    const title = fs.error ? ` title="${escapeHtml(fs.error)}"` : '';
+    const canCancel = (st === 'pending' || st === 'parsing' || st === 'parsed' || st === 'embedding');
+    const cancelBtn = canCancel ? `<button class="btn btn-outline btn-xs" onclick="event.stopPropagation();cancelFileIndex(${idx})" title="取消此文件" style="flex-shrink:0;padding:1px 6px;font-size:10px;color:var(--danger);">❌</button>` : '';
+    const retryBtn = st === 'error' && fp ? `<button class="btn btn-outline btn-xs" onclick="event.stopPropagation();retryFile('${escapeHtmlAttr(fp)}','parse')" title="重新解析" style="flex-shrink:0;padding:1px 6px;font-size:10px;">🔄</button>` : '';
+    html += `<div class="fp-item"${title}>
+      <span class="fp-name">${escapeHtml(name)}</span>
+      ${chunks ? `<span class="fp-chunks">${chunks}</span>` : ''}
+      <span class="fp-status ${st}">${statusLabel[st] || st}</span>
+      ${cancelBtn}${retryBtn}
+    </div>`;
+  }
+
+  panel.innerHTML = html;
+}
+
+async function refreshStatus() {
+  try {
+    const res = await fetch('/api/kb/status?' + kbQuery());
+    const data = await res.json();
+    if (data.success) {
+      document.getElementById('statFiles').textContent = data.data.file_count || 0;
+      document.getElementById('statChunks').textContent = data.data.chunks || 0;
+      renderFileList();
+
+      // Show/hide resume button based on checkpoint
+      const resumeBtn = document.getElementById('resumeBtn');
+      const cp = data.data.checkpoint;
+      if (cp && cp.file_list && cp.file_list.length > 0 && cp.status && !state.indexing) {
+        resumeBtn.style.display = '';
+        const pct = cp.total > 0 ? Math.round(cp.completed / cp.total * 100) : 0;
+        resumeBtn.textContent = `📌 恢复中断索引 (${pct}%)`;
+      } else {
+        resumeBtn.style.display = 'none';
+      }
+
+      // Show failed files from last index run (if any)
+      if (!state.indexing) renderFailedFiles();
+    }
+  } catch(e) {}
+}
+
+async function renderFileList() {
+  try {
+    const res = await fetch('/api/kb/files?' + kbQuery());
+    const data = await res.json();
+    if (!data.success || !data.data.files) return;
+    const el = document.getElementById('fileList');
+    if (data.data.files.length === 0) {
+      el.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-muted);font-size:13px;">暂无文件</div>';
+      return;
+    }
+    const extMap = { word:'📝', excel:'📊', pdf:'📄', visio:'📐', archive:'📦', image:'🖼️', cad:'📐', ppt:'📽️', text:'📃' };
+    const typeLabel = { word:'Word', excel:'Excel', pdf:'PDF', visio:'Visio', archive:'压缩包', image:'图片', cad:'CAD', ppt:'PPT', text:'文本' };
+    // Sort: group by type, then alphabetically
+    const sorted = [...data.data.files].sort((a, b) => {
+      const ta = a.type || 'other', tb = b.type || 'other';
+      if (ta !== tb) return ta.localeCompare(tb);
+      return (a.name || '').localeCompare(b.name || '');
+    });
+    el.innerHTML = sorted.map(f =>
+      `<div class="file-item" data-file-path="${escapeHtmlAttr(f.path)}" style="cursor:pointer;">
+        <span class="icon">${extMap[f.type] || '📄'}</span>
+        <span class="name" title="${escapeHtmlAttr(f.path)}">${escapeHtml(f.name)}</span>
+        <span class="file-type-badge" style="font-size:10px;color:var(--text-muted);background:var(--border-light);padding:1px 6px;border-radius:3px;">${typeLabel[f.type] || f.type || '其他'}</span>
+        <span class="size">${f.chunks || 0} 块</span>
+      </div>`
+    ).join('');
+  } catch(e) {}
+}
+
+function filterFileList() {
+  const query = (document.getElementById('fileSearch').value || '').toLowerCase();
+  const items = document.querySelectorAll('#fileList .file-item');
+  items.forEach(item => {
+    const name = (item.querySelector('.name')?.textContent || '').toLowerCase();
+    const path = (item.dataset.filePath || '').toLowerCase();
+    item.style.display = (!query || name.includes(query) || path.includes(query)) ? '' : 'none';
+  });
+}
+
+async function summarizeAll() {
+  const statusRes = await fetch('/api/kb/status?' + kbQuery());
+  const statusData = await statusRes.json();
+  if (!statusData.success || statusData.data.file_count === 0) {
+    showToast('没有已索引的文件', 'error');
+    return;
+  }
+  if (!state.settings.api_key) { showToast('请先配置 API 密钥', 'error'); openSettings(); return; }
+  const files = statusData.data.files;
+  if (!files || files.length === 0) { showToast('没有已索引的文件', 'error'); return; }
+  if (!confirm(`确定对 ${files.length} 个文件进行全文总结？这可能需要一些时间。`)) return;
+
+  showLoading('正在生成全文总结...');
+  try {
+    const res = await fetch('/api/kb/summarize', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({files, api_key: state.settings.api_key, kb_name: state.currentKb}),
+    });
+    const data = await res.json();
+    hideLoading();
+    if (data.success && data.data) {
+      const container = document.getElementById('chatMessages');
+      const empty = container.querySelector('.chat-empty');
+      if (empty) empty.remove();
+      if (data.data.overall) {
+        const div = document.createElement('div');
+        div.className = 'msg assistant';
+        div.innerHTML = '<b style="font-size:16px;">📊 全文总结报告</b><br><br>' + data.data.overall.replace(/\n/g, '<br>');
+        container.appendChild(div);
+      }
+      (data.data.documents || []).forEach(doc => {
+        const div = document.createElement('div');
+        div.className = 'msg assistant';
+        div.innerHTML = '<b>📄 ' + doc.file_name + '</b> (' + doc.chunks + ' 块)<br><br>' + doc.summary.replace(/\n/g, '<br>');
+        container.appendChild(div);
+      });
+      container.scrollTop = container.scrollHeight;
+      showToast('全文总结完成！', 'success');
+    } else {
+      showToast(data.error || '总结失败', 'error');
+    }
+  } catch(e) {
+    hideLoading();
+    showToast('总结失败: ' + e.message, 'error');
+  }
+}
+
+async function clearAll() {
+  if (!confirm('确定清除所有索引数据？')) return;
+  state.indexErrors = { dup: [], parse: [], embed: [] };
+  renderErrors();
+  try {
+    const res = await fetch('/api/kb/clear', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({kb_name: state.currentKb}),
+    });
+    const data = await res.json();
+    if (data.success) {
+      showToast('索引已清除', 'success');
+      refreshStatus();
+      document.getElementById('fileList').innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-muted);font-size:13px;">暂无文件</div>';
+      document.getElementById('chatMessages').innerHTML = '<div class="chat-empty"><div class="icon">💬</div><p>向知识库提问，获取基于文档的答案</p><p style="font-size:13px;color:var(--text-muted);">先在左侧输入文档目录并构建索引</p></div>';
+    }
+  } catch(e) {
+    showToast('清除失败: ' + e.message, 'error');
+  }
+}
+
+async function resumeIndex() {
+  try {
+    const res = await fetch('/api/kb/status?' + kbQuery());
+    const data = await res.json();
+    if (!data.success || !data.data.checkpoint) {
+      showToast('没有可恢复的索引任务', 'error');
+      return;
+    }
+    const cp = data.data.checkpoint;
+    if (!cp.file_list || cp.file_list.length === 0) {
+      showToast('断点文件列表为空', 'error');
+      return;
+    }
+    if (!confirm(`发现中断的索引任务（已完成 ${cp.completed}/${cp.total} 个文件），是否从中断处继续？`)) return;
+    if (!state.settings.api_key) { showToast('请先配置 API 密钥', 'error'); openSettings(); return; }
+
+    state.indexing = true;
+    const pb = document.getElementById('progressBar');
+    pb.style.display = 'block';
+    document.getElementById('indexStatus').textContent = '恢复索引任务...';
+
+    showLoading(`正在恢复索引 ${cp.file_list.length} 个文件...`);
+    try {
+      const idxRes = await fetch('/api/kb/index', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          files: cp.file_list,
+          api_key: state.settings.api_key,
+          embedding_api_key: state.settings.embedding_api_key,
+          kb_name: state.currentKb,
+        }),
+      });
+      const idxData = await idxRes.json();
+      hideLoading();
+      if (idxData.success) {
+        showToast('索引已恢复，继续处理...', 'success');
+        state.indexingPoll = setInterval(pollIndexStatus, 1000);
+      } else {
+        showToast(idxData.error, 'error');
+        state.indexing = false;
+        pb.style.display = 'none';
+      }
+    } catch(e) {
+      hideLoading();
+      showToast('恢复失败: ' + e.message, 'error');
+      state.indexing = false;
+      pb.style.display = 'none';
+    }
+  } catch(e) {
+    showToast('检查断点失败: ' + e.message, 'error');
+  }
+}
+
+async function shutdownServer() {
+  if (!confirm('确定关闭知识库服务器？关闭后将无法访问，需手动重新启动。')) return;
+  try {
+    await fetch('/api/shutdown', { method: 'POST' });
+    showToast('服务器正在关闭...', 'success');
+    setTimeout(() => {
+      document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:#f5f6f8;color:#1e293b;font-family:sans-serif;"><div style="text-align:center;"><h1 style="font-size:24px;">服务器已关闭</h1><p style="margin-top:12px;color:#64748b;">请手动重新启动 app.py</p></div></div>';
+    }, 1000);
+  } catch(e) {
+    showToast('服务器已关闭', 'success');
+    setTimeout(() => {
+      document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;background:#f5f6f8;color:#1e293b;font-family:sans-serif;"><div style="text-align:center;"><h1 style="font-size:24px;">服务器已关闭</h1><p style="margin-top:12px;color:#64748b;">请手动重新启动 app.py</p></div></div>';
+    }, 1000);
+  }
+}
+
+async function testEmbeddingKeys() {
+  const rawKeys = document.getElementById('embeddingKeyInput').value.trim();
+  if (!rawKeys) { showToast('请先输入 Embedding API 密钥', 'error'); return; }
+
+  const statusEl = document.getElementById('embedTestStatus');
+  const resultsEl = document.getElementById('embedTestResults');
+  statusEl.textContent = '测试中...';
+  statusEl.style.color = 'var(--text-secondary)';
+  resultsEl.style.display = 'block';
+  resultsEl.innerHTML = '<div class="spinner" style="margin:8px auto;"></div>';
+
+  try {
+    const res = await fetch('/api/config/test-embedding', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ keys: rawKeys }),
+    });
+    const data = await res.json();
+    if (data.success && data.data) {
+      const r = data.data;
+      const fail = r.total - r.ok;
+      statusEl.textContent = `${r.ok}/${r.total} 个通过，${fail} 个失败`;
+      statusEl.style.color = fail === 0 ? 'var(--success)' : 'var(--danger)';
+
+      resultsEl.innerHTML = r.results.map(item => {
+        const isOk = item.status === 'ok';
+        const icon = isOk ? '✅' : '❌';
+        const info = isOk ? `${item.elapsed}s` : (item.error || '未知错误');
+        const bg = isOk ? 'var(--success-light)' : 'var(--danger-light)';
+        return `<div style="padding:6px 10px;margin:3px 0;border-radius:4px;background:${bg};font-family:monospace;font-size:11px;">${icon} <b>${escapeHtml(item.key)}</b> &nbsp;${escapeHtml(info)}</div>`;
+      }).join('');
+    } else {
+      statusEl.textContent = '测试失败';
+      statusEl.style.color = 'var(--danger)';
+      resultsEl.innerHTML = `<div style="color:var(--danger);">${escapeHtml(data.error || '未知错误')}</div>`;
+    }
+  } catch(e) {
+    statusEl.textContent = '请求失败';
+    statusEl.style.color = 'var(--danger)';
+    resultsEl.innerHTML = `<div style="color:var(--danger);">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+// ==================== OPEN FILE ====================
+function escapeHtml(str) {
+  return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+function escapeHtmlAttr(str) {
+  return String(str || '').replace(/\\/g, '\\\\').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+async function openFile(filePath) {
+  if (!filePath) return;
+  try {
+    const res = await fetch('/api/kb/open-file', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({path: filePath, kb_name: state.currentKb}),
+    });
+    const data = await res.json();
+    if (!data.success) showToast(data.error || '打开文件失败', 'error');
+  } catch(e) {
+    showToast('打开文件失败: ' + e.message, 'error');
+  }
+}
+
+document.addEventListener('click', (e) => {
+  const link = e.target.closest('[data-file-path]');
+  if (link) { e.preventDefault(); openFile(link.dataset.filePath); }
+});
+
+// ==================== CHAT ====================
+function setupChatInput() {
+  const ta = document.getElementById('chatInput');
+  ta.addEventListener('keydown', (e) => {
+    if ((e.key === 'Enter' && !e.shiftKey) || (e.key === 'Enter' && (e.ctrlKey || e.metaKey))) {
+      e.preventDefault(); sendMessage();
+    }
+  });
+  ta.addEventListener('input', () => {
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
+  });
+}
+
+async function clearChat() {
+  if (!confirm('确定清除所有对话记录？')) return;
+  try {
+    const sid = getActiveSessionId();
+    await fetch('/api/chat/clear', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({kb_name: state.currentKb, session_id: sid}),
+    });
+    document.getElementById('chatMessages').innerHTML =
+      '<div class="chat-empty"><div class="icon">💬</div><p>向知识库提问，获取基于文档的答案</p><p style="font-size:13px;color:var(--text-muted);">先在左侧输入文档目录并构建索引</p></div>';
+    showToast('对话已清除', 'success');
+  } catch(e) {
+    showToast('清除失败: ' + e.message, 'error');
+  }
+}
+
+async function sendMessage() {
+  const input = document.getElementById('chatInput');
+  const query = input.value.trim();
+  if (!query) return;
+  if (!state.settings.api_key) { showToast('请先配置 API 密钥', 'error'); openSettings(); return; }
+
+  input.value = '';
+  input.style.height = '42px';
+  addMessage('user', query);
+
+  const sendBtn = document.getElementById('sendBtn');
+  sendBtn.disabled = true;
+  sendBtn.textContent = '思考中...';
+
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({query, api_key: state.settings.api_key, embedding_api_key: state.settings.embedding_api_key, kb_name: state.currentKb}),
+    });
+    const data = await res.json();
+    if (data.success) {
+      addAssistantMessage(data.data.answer, data.data.sources);
+      // Auto-name session on first user message
+      const sessions = state._cachedSessions || [];
+      const active = sessions.find(s => s.session_id === state.activeSessionId);
+      if (active && (!active.topic || active.topic === '默认会话')) {
+        const topic = query.length > 30 ? query.substring(0, 30) + '...' : query;
+        fetch('/api/kb/session/topic', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({session_id: state.activeSessionId, topic, kb_name: state.currentKb}),
+        }).then(() => loadSidebarSessions()).catch(() => {});
+      }
+    } else {
+      addMessage('assistant', '❌ ' + (data.error || '请求失败'));
+    }
+  } catch(e) {
+    addMessage('assistant', '❌ 网络错误: ' + e.message);
+  }
+  sendBtn.disabled = false;
+  sendBtn.textContent = '发送';
+  input.focus();
+}
+
+function addMessage(role, content) {
+  const container = document.getElementById('chatMessages');
+  const empty = container.querySelector('.chat-empty');
+  if (empty) empty.remove();
+  const div = document.createElement('div');
+  div.className = 'msg ' + role;
+  div.innerHTML = role === 'assistant' ? marked.parse(content) : content.replace(/\n/g, '<br>');
+  const time = document.createElement('div');
+  time.className = 'time';
+  time.textContent = new Date().toLocaleTimeString();
+  div.appendChild(time);
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+}
+
+function addAssistantMessage(answer, sources) {
+  const container = document.getElementById('chatMessages');
+  const sourceMap = new Map();
+
+  // Index sources by file name (from backend sources list)
+  if (sources) {
+    sources.forEach(s => {
+      const key = (s.file_path || s.file).toLowerCase().trim();
+      if (!sourceMap.has(key)) sourceMap.set(key, { num: sourceMap.size + 1, display: s.file, filePath: s.file_path || '', positions: [] });
+    });
+  }
+
+  // Scan for positions (page/chunk references) in [Source: filename, position] format.
+  // sourceMap is already fully built from the backend's sources array above —
+  // this loop only records extra position info, never creates new entries.
+  const srcRegex = /\[Source:\s*([^,\]]+?)(?:,\s*([^\]]+?))?\s*\]|\[(\d+)\]/gi;
+  let m;
+  while ((m = srcRegex.exec(answer)) !== null) {
+    const fileName = (m[1] || '').trim();
+    const position = (m[2] || '').trim();
+    const numRef = m[3] ? parseInt(m[3]) : null;
+
+    let entry = null;
+    if (fileName) {
+      for (const e of sourceMap.values()) {
+        if (e.display.toLowerCase().trim() === fileName.toLowerCase()) { entry = e; break; }
+      }
+    } else if (numRef && numRef >= 1 && numRef <= (sources || []).length) {
+      const s = sources[numRef - 1];
+      if (s) entry = sourceMap.get((s.file_path || s.file).toLowerCase().trim());
+    }
+    if (entry && position && !entry.positions.includes(position)) {
+      entry.positions.push(position);
+    }
+  }
+
+  srcRegex.lastIndex = 0;
+  let processed = answer.replace(srcRegex, (match, fileName, position, numRef) => {
+    if (numRef) {
+      // [N] format — look up by source index, keyed by file_path
+      const idx = parseInt(numRef) - 1;
+      if (idx >= 0 && idx < (sources || []).length) {
+        const s = sources[idx];
+        const key = (s.file_path || s.file).toLowerCase().trim();
+        const entry = sourceMap.get(key);
+        if (entry && entry.filePath) return `<sup class="citation"><a href="#" data-file-path="${escapeHtmlAttr(entry.filePath)}">[${entry.num}]</a></sup>`;
+        if (entry) return `<sup class="citation">[${entry.num}]</sup>`;
+      }
+      // Bug H: number out of range or source not found → warn visually
+      return `<sup class="citation unresolved" title="来源编号 [${numRef}] 无法在参考列表中定位，可能是AI编造了不存在的编号">[${numRef}?]</sup>`;
+    }
+    // [Source: filename] format — search by display name
+    const name = (fileName || '').toLowerCase().trim();
+    let entry = null;
+    for (const e of sourceMap.values()) {
+      if (e.display.toLowerCase().trim() === name) { entry = e; break; }
+    }
+    if (!entry) return `<sup class="citation unresolved" title="来源「${escapeHtmlAttr(fileName || '')}」未在参考列表中找到">[?]</sup>`;
+    if (entry.filePath) return `<sup class="citation"><a href="#" data-file-path="${escapeHtmlAttr(entry.filePath)}">[${entry.num}]</a></sup>`;
+    return `<sup class="citation">[${entry.num}]</sup>`;
+  });
+
+  const div = document.createElement('div');
+  div.className = 'msg assistant';
+  div.innerHTML = marked.parse(processed);
+
+  if (sourceMap.size > 0) {
+    const sorted = [...sourceMap.values()].sort((a, b) => a.num - b.num);
+    const refDiv = document.createElement('div');
+    refDiv.className = 'ref-list';
+    refDiv.innerHTML = sorted.map(e => {
+      const numHtml = e.filePath
+        ? `<span class="num num-link" data-file-path="${escapeHtmlAttr(e.filePath)}">[${e.num}]</span>`
+        : `<span class="num">[${e.num}]</span>`;
+      const posHtml = e.positions.length > 0 ? ` — ${e.positions.join(', ')}` : '';
+      return `<p class="ref-item">${numHtml}${e.display}${posHtml}</p>`;
+    }).join('');
+    div.appendChild(refDiv);
+  }
+
+  const time = document.createElement('div');
+  time.className = 'time';
+  time.textContent = new Date().toLocaleTimeString();
+  div.appendChild(time);
+
+  const empty = container.querySelector('.chat-empty');
+  if (empty) empty.remove();
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+}
+
+// ==================== MATERIAL GEN ====================
+function renderTemplates() {
+  const el = document.getElementById('templateList');
+  el.innerHTML = '<button class="btn btn-outline btn-sm" onclick="loadTemplate(\'custom\')">📋 自定义</button>';
+  fetch('/api/material/templates').then(r => r.json()).then(data => {
+    if (data.success) {
+      Object.keys(data.data).forEach(name => {
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-outline btn-sm';
+        btn.textContent = name;
+        btn.onclick = () => loadTemplate(name);
+        el.appendChild(btn);
+      });
+    }
+  }).catch(() => {});
+}
+
+async function loadTemplate(name) {
+  if (name === 'custom') { document.getElementById('frameworkInput').value = ''; return; }
+  try {
+    const res = await fetch('/api/material/templates');
+    const data = await res.json();
+    if (data.success && data.data[name]) document.getElementById('frameworkInput').value = data.data[name];
+  } catch(e) {}
+}
+
+async function generateMaterial() {
+  const framework = document.getElementById('frameworkInput').value.trim();
+  if (!framework) { showToast('请输入框架大纲', 'error'); return; }
+  if (!state.settings.api_key) { showToast('请先配置 API 密钥', 'error'); openSettings(); return; }
+
+  const output = document.getElementById('matOutput');
+  output.innerHTML = '<div style="text-align:center;padding:40px;"><div class="spinner"></div><p style="margin-top:12px;color:var(--text-muted);">正在生成材料，请耐心等待...</p></div>';
+
+  try {
+    const res = await fetch('/api/material/generate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({framework, api_key: state.settings.api_key, kb_name: state.currentKb}),
+    });
+    const data = await res.json();
+    if (data.success && data.data) {
+      output.innerHTML = '';
+      const sections = data.data.sections || [];
+
+      const sourceMap = new Map();
+      let num = 1;
+      const srcRegex = /\[Source:\s*([^,\]]+?)(?:,\s*([^\]]+?))?\s*\]/gi;
+
+      sections.forEach(sec => {
+        (sec.sources || []).forEach(s => {
+          const key = s.file.toLowerCase().trim();
+          if (!sourceMap.has(key)) sourceMap.set(key, { num: num++, display: s.file, filePath: s.file_path || '', positions: [] });
+        });
+        let m;
+        while ((m = srcRegex.exec(sec.content)) !== null) {
+          const fileName = (m[1] || '').trim(), position = (m[2] || '').trim(), key = fileName.toLowerCase();
+          if (sourceMap.has(key)) {
+            if (position && !sourceMap.get(key).positions.includes(position)) sourceMap.get(key).positions.push(position);
+          } else {
+            sourceMap.set(key, { num: num++, display: fileName, filePath: '', positions: position ? [position] : [] });
+          }
+        }
+      });
+
+      sections.forEach(sec => {
+        const h = document.createElement('h' + Math.min(sec.depth + 1, 4));
+        h.textContent = sec.number + ' ' + sec.title;
+        output.appendChild(h);
+        const p = document.createElement('div');
+        srcRegex.lastIndex = 0;
+        let content = sec.content.replace(srcRegex, (match, fileName, position) => {
+          const key = (fileName || '').toLowerCase().trim();
+          const entry = sourceMap.get(key);
+          if (!entry) return match;
+          if (entry.filePath) return `<sup class="citation"><a href="#" data-file-path="${escapeHtmlAttr(entry.filePath)}">[${entry.num}]</a></sup>`;
+          return `<sup class="citation">[${entry.num}]</sup>`;
+        });
+        p.innerHTML = content.replace(/\n/g, '<br>');
+        output.appendChild(p);
+      });
+
+      if (sourceMap.size > 0) {
+        const sorted = [...sourceMap.values()].sort((a, b) => a.num - b.num);
+        const refDiv = document.createElement('div');
+        refDiv.className = 'ref-list';
+        refDiv.innerHTML = '<hr><h4>📚 参考来源</h4>' +
+          sorted.map(e => {
+            const numHtml = e.filePath
+              ? `<span class="num num-link" data-file-path="${escapeHtmlAttr(e.filePath)}">[${e.num}]</span>`
+              : `<span class="num">[${e.num}]</span>`;
+            const posHtml = e.positions.length > 0 ? ` — ${e.positions.join(', ')}` : '';
+            return `<p class="ref-item">${numHtml}${e.display}${posHtml}</p>`;
+          }).join('');
+        output.appendChild(refDiv);
+      }
+      output.dataset.fullText = data.data.full_text || '';
+      showToast('材料生成完成！', 'success');
+    } else {
+      output.innerHTML = '<div style="color:var(--danger);padding:20px;">生成失败: ' + (data.error || '未知错误') + '</div>';
+    }
+  } catch(e) {
+    output.innerHTML = '<div style="color:var(--danger);padding:20px;">生成失败: ' + e.message + '</div>';
+  }
+}
+
+function copyMaterial() {
+  const output = document.getElementById('matOutput');
+  const text = output.dataset.fullText || output.textContent;
+  if (!text || text === '暂无数据') { showToast('没有可复制的内容', 'error'); return; }
+  navigator.clipboard.writeText(text).then(() => showToast('已复制到剪贴板', 'success')).catch(() => showToast('复制失败', 'error'));
+}
+
+async function exportMaterial() {
+  const output = document.getElementById('matOutput');
+  const text = output.dataset.fullText || output.textContent;
+  if (!text || text === '暂无数据') { showToast('没有可导出的内容', 'error'); return; }
+  try {
+    const res = await fetch('/api/material/export', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text, format: 'md'}),
+    });
+    const data = await res.json();
+    if (data.success) {
+      const blob = new Blob([data.data.text], {type: 'text/markdown'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = '核实材料_' + new Date().toISOString().slice(0,10) + '.md';
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('导出成功', 'success');
+    }
+  } catch(e) {
+    showToast('导出失败: ' + e.message, 'error');
+  }
+}
+
+// ==================== SETTINGS ====================
+function openSettings() {
+  document.getElementById('apiKeyInput').value = state.settings.api_key || '';
+  document.getElementById('embeddingKeyInput').value = state.settings.embedding_api_key || '';
+  document.getElementById('chunkSizeInput').value = state.settings.chunk_size || 512;
+  document.getElementById('topKInput').value = state.settings.top_k || 5;
+  document.getElementById('apiTestResult').textContent = '';
+  document.getElementById('settingsModal').classList.add('show');
+}
+
+function closeSettings() {
+  document.getElementById('settingsModal').classList.remove('show');
+}
+
+async function testApi() {
+  const key = document.getElementById('apiKeyInput').value.trim();
+  if (!key) { showToast('请输入 API 密钥', 'error'); return; }
+  const el = document.getElementById('apiTestResult');
+  el.textContent = '测试中...';
+  el.style.color = 'var(--text-secondary)';
+  try {
+    const res = await fetch('/api/config/test', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({api_key: key}),
+    });
+    const data = await res.json();
+    if (data.success) {
+      el.textContent = '✅ 连接成功: ' + (data.data.model || '');
+      el.style.color = 'var(--success)';
+      showToast('API 连接成功！', 'success');
+    } else {
+      el.textContent = '❌ ' + (data.error || '连接失败');
+      el.style.color = 'var(--danger)';
+    }
+  } catch(e) {
+    el.textContent = '❌ ' + e.message;
+    el.style.color = 'var(--danger)';
+  }
+}
+
+async function saveSettings() {
+  const apiKey = document.getElementById('apiKeyInput').value.trim();
+  const embeddingKey = document.getElementById('embeddingKeyInput').value.trim();
+  const chunkSize = parseInt(document.getElementById('chunkSizeInput').value) || 512;
+  const topK = parseInt(document.getElementById('topKInput').value) || 5;
+  const themeSelect = document.getElementById('themeSelectModal');
+  const theme = themeSelect ? themeSelect.value : 'blue';
+
+  state.settings.api_key = apiKey;
+  state.settings.embedding_api_key = embeddingKey;
+  state.settings.chunk_size = chunkSize;
+  state.settings.top_k = topK;
+  state.settings.theme = theme;
+  applyTheme(theme);
+  saveSettingsToLocal();
+  updateApiStatus();
+
+  try {
+    await fetch('/api/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({api_key: apiKey, embedding_api_key: embeddingKey, chunk_size: chunkSize, top_k: topK}),
+    });
+  } catch(e) {}
+  closeSettings();
+  showToast('设置已保存', 'success');
+}
+
+// ==================== LOADING ====================
+function showLoading(text) {
+  document.getElementById('loadingText').textContent = text || '处理中...';
+  document.getElementById('loadingOverlay').classList.add('show');
+}
+function hideLoading() {
+  document.getElementById('loadingOverlay').classList.remove('show');
+}
+
+// ==================== TOAST ====================
+let toastTimer = null;
+function showToast(msg, type) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'toast' + (type ? ' ' + type : '');
+  clearTimeout(toastTimer);
+  requestAnimationFrame(() => {
+    el.classList.add('show');
+    toastTimer = setTimeout(() => el.classList.remove('show'), 3000);
+  });
+}
+
+// ==================== DEEP ANALYSIS ====================
+let analysisMode = 'focus';
+let analysisSelectedFiles = new Set();
+
+function switchAnalysisMode(mode) {
+  analysisMode = mode;
+  document.getElementById('panelFocus').style.display = mode === 'focus' ? '' : 'none';
+  document.getElementById('panelScan').style.display = mode === 'scan' ? '' : 'none';
+  document.getElementById('modeLabelA').classList.toggle('active', mode === 'focus');
+  document.getElementById('modeLabelB').classList.toggle('active', mode === 'scan');
+}
+
+async function loadAnalysisFileList() {
+  const el = document.getElementById('analysisFileList');
+  if (!el || el.dataset.loaded) return;
+  el.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">加载中...</div>';
+  try {
+    const res = await fetch('/api/kb/files?kb_name=' + encodeURIComponent(state.currentKb));
+    const data = await res.json();
+    const files = (data.data && data.data.files) ? data.data.files : [];
+    el.dataset.loaded = '1';
+    if (files.length === 0) {
+      el.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted);">暂无已索引文件</div>';
+      return;
+    }
+    el.innerHTML = files.map(f => {
+      var name = f.name || (f.path || '').split('\\').pop().split('/').pop();
+      return '<div class="analysis-file-item" data-path="' + escapeHtmlAttr(f.path || '') + '" onclick="toggleAnalysisFile(this, \'' + escapeHtmlAttr(f.path || '') + '\')">' +
+        '<input type="checkbox" style="pointer-events:none;" /> ' +
+        '<span>' + escapeHtml(name) + '</span>' +
+        '<span style="margin-left:auto;font-size:11px;color:var(--text-muted);">' + (f.chunks || 0) + ' 块</span>' +
+        '</div>';
+    }).join('');
+  } catch(e) {
+    el.innerHTML = '<div style="text-align:center;padding:20px;color:var(--danger);">加载失败</div>';
+  }
+}
+
+function filterAnalysisFiles() {
+  var q = (document.getElementById('analysisFileSearch') || {}).value || '';
+  q = q.toLowerCase();
+  document.querySelectorAll('#analysisFileList .analysis-file-item').forEach(function(item) {
+    var name = (item.textContent || '').toLowerCase();
+    item.style.display = (!q || name.indexOf(q) !== -1) ? '' : 'none';
+  });
+}
+
+function toggleAnalysisFile(el, fpath) {
+  if (analysisSelectedFiles.has(fpath)) {
+    analysisSelectedFiles.delete(fpath);
+    el.classList.remove('selected');
+    el.querySelector('input').checked = false;
+  } else {
+    analysisSelectedFiles.add(fpath);
+    el.classList.add('selected');
+    el.querySelector('input').checked = true;
+  }
+  document.getElementById('analysisFileCount').textContent = '已选 ' + analysisSelectedFiles.size + ' 个文件';
+}
+
+function selectAllAnalysisFiles() {
+  var items = document.querySelectorAll('#analysisFileList .analysis-file-item');
+  items.forEach(function(item) {
+    var fpath = item.dataset.path;
+    if (fpath && item.style.display !== 'none') {
+      analysisSelectedFiles.add(fpath);
+      item.classList.add('selected');
+      item.querySelector('input').checked = true;
+    }
+  });
+  document.getElementById('analysisFileCount').textContent = '已选 ' + analysisSelectedFiles.size + ' 个文件';
+}
+
+function deselectAllAnalysisFiles() {
+  analysisSelectedFiles.clear();
+  document.querySelectorAll('#analysisFileList .analysis-file-item').forEach(function(item) {
+    item.classList.remove('selected');
+    item.querySelector('input').checked = false;
+  });
+  document.getElementById('analysisFileCount').textContent = '已选 0 个文件';
+}
+
+function selectByFolder() {
+  var folder = document.getElementById('analysisFolderInput').value.trim();
+  if (!folder) { showToast('请输入文件夹路径', 'error'); return; }
+  // Normalize separators
+  var folderNorm = folder.replace(/\//g, '\\\\').replace(/\\\\+$/, '') + '\\\\';
+  var matched = 0;
+  document.querySelectorAll('#analysisFileList .analysis-file-item').forEach(function(item) {
+    var fpath = (item.dataset.path || '').replace(/\//g, '\\\\');
+    if (fpath.indexOf(folderNorm) === 0) {
+      analysisSelectedFiles.add(item.dataset.path);
+      item.classList.add('selected');
+      item.querySelector('input').checked = true;
+      matched++;
+    }
+  });
+  document.getElementById('analysisFileCount').textContent = '已选 ' + analysisSelectedFiles.size + ' 个文件';
+  showToast('已选中 ' + matched + ' 个文件', 'success');
+}
+
+function handleAnalysisDrop(e) {
+  e.preventDefault();
+  var zone = document.getElementById('analysisDropZone');
+  zone.classList.remove('drag-over');
+
+  var items = e.dataTransfer.items;
+  if (!items) return;
+
+  var droppedNames = [];
+  var processEntry = function(entry) {
+    if (entry.isFile) {
+      droppedNames.push(entry.name);
+    } else if (entry.isDirectory) {
+      // Read all files in directory recursively
+      var reader = entry.createReader();
+      var readAll = function() {
+        reader.readEntries(function(entries) {
+          if (entries.length === 0) return;
+          entries.forEach(processEntry);
+          readAll(); // Continue reading (readEntries is batched)
+        });
+      };
+      readAll();
+    }
+  };
+
+  // Convert DataTransferItemList to entries
+  var entries = [];
+  for (var i = 0; i < items.length; i++) {
+    var entry = items[i].webkitGetAsEntry ? items[i].webkitGetAsEntry() : null;
+    if (entry) {
+      processEntry(entry);
+    } else if (items[i].kind === 'file') {
+      droppedNames.push(items[i].getAsFile().name);
+    }
+  }
+
+  // Match dropped file names against indexed files
+  setTimeout(function() {
+    if (droppedNames.length === 0) { showToast('未识别到文件', 'error'); return; }
+    var matched = 0;
+    document.querySelectorAll('#analysisFileList .analysis-file-item').forEach(function(item) {
+      var fpath = item.dataset.path || '';
+      var fname = fpath.split('\\\\').pop().split('/').pop();
+      if (droppedNames.indexOf(fname) !== -1) {
+        analysisSelectedFiles.add(fpath);
+        item.classList.add('selected');
+        item.querySelector('input').checked = true;
+        matched++;
+      }
+    });
+    document.getElementById('analysisFileCount').textContent = '已选 ' + analysisSelectedFiles.size + ' 个文件';
+    showToast('拖拽 ' + droppedNames.length + ' 个文件，匹配选中 ' + matched + ' 个', 'success');
+  }, 500);
+}
+
+async function runFocusAnalysis() {
+  if (analysisSelectedFiles.size === 0) { showToast('请先选择要分析的文件', 'error'); return; }
+  var task = document.getElementById('analysisTask').value.trim();
+  if (!task) { showToast('请描述审计任务', 'error'); return; }
+
+  var resultsDiv = document.getElementById('analysisResults');
+  var spinner = document.getElementById('analysisSpinner');
+  var progress = document.getElementById('analysisProgress');
+  var output = document.getElementById('analysisOutput');
+  var sourcesDiv = document.getElementById('analysisSources');
+  var sourcesList = document.getElementById('analysisSourcesList');
+
+  resultsDiv.style.display = '';
+  spinner.style.display = '';
+  output.innerHTML = '';
+  sourcesDiv.style.display = 'none';
+  document.getElementById('analysisResultsTitle').textContent = '分析中...';
+  progress.textContent = '正在分析 ' + analysisSelectedFiles.size + ' 个文件...';
+  document.getElementById('btnFocusRun').disabled = true;
+
+  try {
+    var res = await fetch('/api/analysis/focus', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        file_paths: Array.from(analysisSelectedFiles),
+        task: task,
+        api_key: state.settings.api_key,
+        kb_name: state.currentKb,
+      }),
+    });
+    var data = await res.json();
+    spinner.style.display = 'none';
+
+    if (data.success) {
+      document.getElementById('analysisResultsTitle').textContent = '分析结果';
+      output.innerHTML = marked.parse(data.data.result_markdown || '');
+      if (data.data.sources && data.data.sources.length) {
+        sourcesList.innerHTML = data.data.sources.map(function(s) {
+          return '<div class="analysis-source-item">📄 ' + escapeHtml(s.file) + ' (' + s.chunks + ' 块)</div>';
+        }).join('');
+        sourcesDiv.style.display = '';
+      }
+    } else {
+      output.innerHTML = '<div style="color:var(--danger);">' + escapeHtml(data.error || '分析失败') + '</div>';
+    }
+  } catch(e) {
+    spinner.style.display = 'none';
+    output.innerHTML = '<div style="color:var(--danger);">请求失败: ' + escapeHtml(e.message) + '</div>';
+  }
+  document.getElementById('btnFocusRun').disabled = false;
+}
+
+async function runScanAnalysis() {
+  var framework = document.getElementById('analysisFramework').value.trim();
+  if (!framework) { showToast('请输入分析框架', 'error'); return; }
+
+  var resultsDiv = document.getElementById('analysisResults');
+  var spinner = document.getElementById('analysisSpinner');
+  var progress = document.getElementById('analysisProgress');
+  var output = document.getElementById('analysisOutput');
+  var sourcesDiv = document.getElementById('analysisSources');
+  var sourcesList = document.getElementById('analysisSourcesList');
+
+  resultsDiv.style.display = '';
+  spinner.style.display = '';
+  output.innerHTML = '';
+  sourcesDiv.style.display = 'none';
+  document.getElementById('analysisResultsTitle').textContent = '遍历分析中...';
+  progress.textContent = '正在搜索全部文件并按框架提取信息，可能需要 1-2 分钟...';
+  document.getElementById('btnScanRun').disabled = true;
+
+  try {
+    var res = await fetch('/api/analysis/scan', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        framework: framework,
+        api_key: state.settings.api_key,
+        kb_name: state.currentKb,
+      }),
+    });
+    var data = await res.json();
+    spinner.style.display = 'none';
+
+    if (data.success) {
+      document.getElementById('analysisResultsTitle').textContent = '分析结果（扫描 ' + (data.data.files_scanned || 0) + ' 个文件，命中 ' + (data.data.files_hit || 0) + ' 个）';
+      output.innerHTML = marked.parse(data.data.result_markdown || '');
+      if (data.data.sources && data.data.sources.length) {
+        sourcesList.innerHTML = data.data.sources.map(function(s) {
+          return '<div class="analysis-source-item">📄 ' + escapeHtml(s.file) + '</div>';
+        }).join('');
+        sourcesDiv.style.display = '';
+      }
+    } else {
+      output.innerHTML = '<div style="color:var(--danger);">' + escapeHtml(data.error || '分析失败') + '</div>';
+    }
+  } catch(e) {
+    spinner.style.display = 'none';
+    output.innerHTML = '<div style="color:var(--danger);">请求失败: ' + escapeHtml(e.message) + '</div>';
+  }
+  document.getElementById('btnScanRun').disabled = false;
+}
+
+function copyAnalysisResult() {
+  var text = document.getElementById('analysisOutput').textContent || '';
+  navigator.clipboard.writeText(text).then(function() {
+    showToast('已复制到剪贴板', 'success');
+  });
+}
+
+function exportAnalysisResult() {
+  var text = document.getElementById('analysisOutput').textContent || '';
+  var blob = new Blob([text], {type: 'text/markdown'});
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'analysis_' + new Date().toISOString().slice(0, 10) + '.md';
+  a.click();
+  showToast('已导出', 'success');
+}
+
+function clearAnalysis() {
+  analysisSelectedFiles.clear();
+  document.getElementById('analysisFileCount').textContent = '已选 0 个文件';
+  document.querySelectorAll('#analysisFileList .analysis-file-item').forEach(function(el) {
+    el.classList.remove('selected');
+    el.querySelector('input').checked = false;
+  });
+  document.getElementById('analysisResults').style.display = 'none';
+  document.getElementById('analysisOutput').innerHTML = '';
+}
+
+// ==================== INIT ====================
+init();

@@ -52,18 +52,22 @@ def ask_question(query, api_key=DEEPSEEK_API_KEY, top_k=TOP_K_RESULTS, history=N
 
     if ctx:
         system_content = (
-            "你是一个知识库助手。回答时遵循以下原则：\n"
-            "1. 注意对话历史，结合上下文理解用户的问题\n"
-            "2. 优先使用以下知识库内容回答，并用 [Source: 文件名] 标注来源\n"
-            "3. 如果以下内容不足以回答，可以结合对话历史或你自己的知识补充\n"
-            "4. 回答请使用中文\n\n"
-            f"【知识库相关参考】\n{ctx}"
+            "你是一个专业的知识库助手。回答时请严格遵循以下原则：\n"
+            "1. 结合对话历史理解用户的真实意图\n"
+            "2. 【强制要求】优先使用下方【知识库参考内容】回答，每个从知识库获取的事实、数据、条款都必须"
+            "在句末标注参考编号，如 [1]、[2]、[3] 等，对应参考内容的编号\n"
+            "3. 【强制要求】请提供详细、全面的回答，包含具体数据、条款原文和解释，"
+            "避免过于简略的结论，让用户无需查看原文即可理解全部要点\n"
+            "4. 如果参考内容不足以完全回答，可以结合你自己的知识补充，但要明确说明哪些来自知识库、哪些来自补充\n"
+            "5. 使用中文回答\n\n"
+            f"【知识库参考内容】\n{ctx}"
         )
     else:
         system_content = (
-            "你是一个知识库助手。回答时遵循以下原则：\n"
-            "1. 注意对话历史，结合上下文理解用户的问题\n"
-            "2. 回答请使用中文"
+            "你是一个专业的知识库助手。回答时请遵循以下原则：\n"
+            "1. 结合对话历史理解用户的问题\n"
+            "2. 请提供详细、全面的回答\n"
+            "3. 使用中文回答"
         )
 
     messages = [{"role": "system", "content": system_content}]
@@ -84,7 +88,7 @@ def ask_question(query, api_key=DEEPSEEK_API_KEY, top_k=TOP_K_RESULTS, history=N
     return {"answer": answer_text, "sources": sources}
 
 
-def _call_chat_api(messages, api_key, temperature=0.3):
+def _call_chat_api(messages, api_key, temperature=0.6):
     retries = 3
     for attempt in range(retries):
         try:

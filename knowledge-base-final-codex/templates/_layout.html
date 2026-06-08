@@ -1,0 +1,351 @@
+
+<!-- ==================== SIDEBAR ==================== -->
+<div class="sidebar" id="sidebar">
+  <div class="sidebar-header">
+    <span class="dot"></span> 知识库
+  </div>
+  <div class="library-bar">
+    <select id="librarySelect" onchange="switchLibrary(this.value)"></select>
+    <button class="btn-icon" onclick="promptCreateLibrary()" title="新建知识库">+</button>
+    <button class="btn-icon danger" onclick="promptDeleteLibrary()" title="删除当前知识库">×</button>
+  </div>
+  <div class="sidebar-content">
+    <div class="sidebar-section">
+      <div class="sidebar-label">📂 文档目录</div>
+      <div class="dir-input">
+        <input type="text" id="dirInput" placeholder="输入文档目录路径..." />
+        <button class="btn btn-primary btn-sm" onclick="scanDir()">扫描</button>
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">⚡ 操作</div>
+      <div class="sidebar-actions">
+        <button class="btn btn-primary" onclick="promptStartIndex()">🚀 开始索引</button>
+        <button class="btn btn-outline" onclick="openSettings()">⚙️ 设置</button>
+        <button class="btn btn-outline" onclick="refreshStatus()">🔄 刷新状态</button>
+        <button class="btn btn-outline" onclick="clearAll()">🗑️ 清除索引</button>
+        <button class="btn btn-warning" onclick="summarizeAll()">📝 全文总结</button>
+        <button class="btn btn-outline" id="resumeBtn" onclick="resumeIndex()" style="display:none;">📌 恢复中断索引</button>
+        <button class="btn btn-danger" id="stopBtn" onclick="stopIndexing()" style="display:none;">⏹ 停止索引</button>
+        <button class="btn btn-outline" onclick="shutdownServer()" style="color:var(--danger);">⏻ 关闭服务器</button>
+      </div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">🎨 界面主题</div>
+      <select id="themeSelect" onchange="switchTheme(this.value)"
+        style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--card);color:var(--text);font-size:13px;outline:none;cursor:pointer;">
+        <option value="blue">🔵 专业蓝</option>
+        <option value="glass">💠 玻璃拟态</option>
+      </select>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">📊 状态</div>
+      <div class="stats-grid">
+        <div class="stat-card"><div class="num" id="statFiles">0</div><div class="lbl">文件</div></div>
+        <div class="stat-card"><div class="num" id="statChunks">0</div><div class="lbl">文本块</div></div>
+      </div>
+      <div id="indexStatsPanel" style="display:none;margin-top:10px;padding:10px 12px;background:var(--card);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:12px;">
+        <div style="font-weight:600;margin-bottom:6px;color:var(--text);">📋 索引进度</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px 12px;line-height:1.8;">
+          <span style="color:var(--text-secondary);">📁 总文件:</span><span id="idxTotal" style="text-align:right;font-weight:600;">0</span>
+          <span style="color:var(--text-secondary);">🔄 重复跳过:</span><span id="idxDup" style="text-align:right;color:var(--warning);">0</span>
+          <span style="color:var(--text-secondary);">📝 已解析:</span><span id="idxParsed" style="text-align:right;color:var(--info);">0</span>
+          <span style="color:var(--text-secondary);">⬆️ 已嵌入:</span><span id="idxEmbedded" style="text-align:right;color:var(--success);">0</span>
+          <span style="color:var(--text-secondary);">⏳ 进行中:</span><span id="idxActive" style="text-align:right;">0</span>
+          <span style="color:var(--text-secondary);">❌ 错误:</span><span id="idxErrors" style="text-align:right;color:var(--danger);">0</span>
+        </div>
+      </div>
+      <div class="progress-bar" id="progressBar" style="display:none">
+        <div class="fill" id="progressFill"></div>
+      </div>
+      <div id="indexStatus"></div>
+      <div class="file-progress-panel" id="fileProgressPanel" style="display:none;"></div>
+      <!-- 失败文件明细已合并至下方「索引结果」面板，此处不再重复展示 -->
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">📄 已索引文件</div>
+      <input type="text" id="fileSearch" placeholder="搜索文件..." oninput="filterFileList()"
+        style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--card);color:var(--text);font-size:12px;outline:none;margin-bottom:8px;"
+      />
+      <div class="file-list" id="fileList">
+        <div style="text-align:center;padding:16px;color:var(--text-muted);font-size:13px;">暂无文件</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== SPLITTER ==================== -->
+<div class="splitter" id="sidebarSplitter"></div>
+
+<!-- ==================== MAIN ==================== -->
+<div class="main" id="mainArea">
+  <div class="main-header">
+    <div class="tabs">
+      <div class="tab active" data-tab="chat" onclick="switchTab('chat')">💬 对话</div>
+      <div class="tab" data-tab="material" onclick="switchTab('material')">📄 资料生成</div>
+      <div class="tab" data-tab="search" onclick="switchTab('search')">🔍 文件检索</div>
+      <div class="tab" data-tab="analysis" onclick="switchTab('analysis')">🔬 深度分析</div>
+    </div>
+    <div class="spacer"></div>
+    <span class="status-badge" id="apiStatus">API 未配置</span>
+    <button class="session-toggle-btn" id="sessionToggleBtn" onclick="toggleSessionPanel()" title="展开会话列表">☰</button>
+    <button class="btn btn-outline btn-sm" onclick="clearChat()" style="margin-left:4px;">清除对话</button>
+  </div>
+
+  <!-- ===== Chat Tab ===== -->
+  <div class="tab-content active" id="tabChat">
+    <div class="chat-layout">
+      <div class="chat-main">
+        <div class="chat-messages" id="chatMessages">
+          <div class="chat-empty">
+            <div class="icon">💬</div>
+            <p>向知识库提问，获取基于文档的答案</p>
+            <p style="font-size:13px;color:var(--text-muted);">先在左侧输入文档目录并构建索引</p>
+          </div>
+        </div>
+        <div class="chat-input-bar">
+          <textarea id="chatInput" rows="1" placeholder="输入问题... (Enter 发送, Shift+Enter 换行)" style="height:42px;"></textarea>
+          <button class="btn btn-primary" onclick="sendMessage()" id="sendBtn">发送</button>
+        </div>
+      </div>
+      <div class="session-splitter" id="sessionSplitter"></div>
+      <div class="session-panel" id="sessionPanel">
+        <div class="session-panel-header">
+          <span>💬 会话</span>
+          <button class="btn btn-outline btn-xs btn-toggle" onclick="toggleSessionPanel()" title="折叠面板">◀</button>
+        </div>
+        <button class="session-new-btn" onclick="newSession()">+ 新会话</button>
+        <div class="session-list" id="sessionList"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Material Gen Tab ===== -->
+  <div class="tab-content" id="tabMaterial">
+    <div class="mat-container">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;flex-shrink:0;">
+        <span style="font-size:13px;font-weight:500;">模板：</span>
+        <div class="mat-templates" id="templateList"></div>
+      </div>
+      <div class="row">
+        <div class="mat-panel">
+          <div class="panel-header">
+            <span>📋 框架大纲</span>
+            <span style="font-size:11px;color:var(--text-muted);">输入章节结构，自动生成内容</span>
+          </div>
+          <textarea id="frameworkInput" placeholder="输入框架大纲，例如：
+
+1. 质量管理体系
+  1.1 质量方针
+  1.2 文件控制
+2. 管理职责
+  2.1 管理承诺
+  2.2 策划
+3. 资源管理
+  3.1 人力资源
+  3.2 基础设施"></textarea>
+        </div>
+        <div class="mat-panel">
+          <div class="panel-header">
+            <span>📝 生成结果</span>
+            <div class="mat-actions">
+              <button class="btn btn-primary btn-sm" onclick="generateMaterial()">🚀 生成</button>
+              <button class="btn btn-outline btn-sm" onclick="exportMaterial()">📥 导出</button>
+              <button class="btn btn-outline btn-sm" onclick="copyMaterial()">📋 复制</button>
+            </div>
+          </div>
+          <div class="mat-output" id="matOutput">
+            <div style="text-align:center;padding:40px;color:var(--text-muted);">点击"生成"按钮开始</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== File Search Tab ===== -->
+  <div class="tab-content" id="tabSearch">
+    <div class="search-container">
+      <div class="search-bar">
+        <input type="text" id="searchInput" placeholder="输入关键字搜索文件内容..."
+               onkeydown="if(event.key==='Enter') doFileSearch()" />
+        <button class="btn btn-primary" onclick="doFileSearch()">🔍 搜索</button>
+      </div>
+      <div class="search-options">
+        <label><input type="radio" name="searchMode" value="keyword" checked /> 关键字匹配</label>
+        <label><input type="radio" name="searchMode" value="fuzzy" /> 模糊匹配</label>
+        <span class="spacer"></span>
+        <span class="search-stats" id="searchStats"></span>
+      </div>
+      <div class="search-results" id="searchResults">
+        <div class="search-empty">
+          <div style="font-size:40px;opacity:.2;margin-bottom:8px;">🔍</div>
+          <p>输入关键字，在已索引文件中搜索相关内容</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Deep Analysis Tab ===== -->
+  <div class="tab-content" id="tabAnalysis">
+    <div class="analysis-container">
+      <!-- Mode Switch -->
+      <div class="analysis-mode-bar">
+        <label class="analysis-mode-label" id="modeLabelA" onclick="switchAnalysisMode('focus')">
+          <input type="radio" name="analysisMode" value="focus" checked /> 🎯 聚焦检查
+        </label>
+        <label class="analysis-mode-label" id="modeLabelB" onclick="switchAnalysisMode('scan')">
+          <input type="radio" name="analysisMode" value="scan" /> 📋 全库遍历
+        </label>
+      </div>
+
+      <!-- Mode A: Focus -->
+      <div class="analysis-panel" id="panelFocus">
+        <div class="analysis-row">
+          <div class="analysis-left">
+            <div class="analysis-section-label">📂 选择文件</div>
+            <!-- Drag & drop zone -->
+            <div class="analysis-drop-zone" id="analysisDropZone"
+                 ondragover="event.preventDefault();this.classList.add('drag-over')"
+                 ondragleave="this.classList.remove('drag-over')"
+                 ondrop="handleAnalysisDrop(event)">
+              📁 拖拽文件或文件夹到此处
+            </div>
+            <!-- Folder path batch select -->
+            <div style="display:flex;gap:4px;margin-bottom:6px;">
+              <input type="text" id="analysisFolderInput" placeholder="或粘贴文件夹路径，自动选该目录下所有文件..."
+                style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--card);color:var(--text);font-size:12px;outline:none;" />
+              <button class="btn btn-outline btn-xs" onclick="selectByFolder()" style="white-space:nowrap;">选此目录</button>
+            </div>
+            <!-- Search + batch buttons -->
+            <div style="display:flex;gap:4px;margin-bottom:6px;">
+              <input type="text" id="analysisFileSearch" placeholder="搜索文件名..." oninput="filterAnalysisFiles()"
+                style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--card);color:var(--text);font-size:12px;outline:none;" />
+              <button class="btn btn-outline btn-xs" onclick="selectAllAnalysisFiles()" style="white-space:nowrap;">全选</button>
+              <button class="btn btn-outline btn-xs" onclick="deselectAllAnalysisFiles()" style="white-space:nowrap;">取消</button>
+            </div>
+            <div class="analysis-file-list" id="analysisFileList">
+              <div style="text-align:center;padding:20px;color:var(--text-muted);font-size:13px;">加载中...</div>
+            </div>
+            <div style="font-size:12px;color:var(--text-muted);margin-top:4px;" id="analysisFileCount">已选 0 个文件</div>
+          </div>
+          <div class="analysis-right">
+            <div class="analysis-section-label">💬 审计任务</div>
+            <textarea id="analysisTask" placeholder="描述你的检查任务，例如：&#10;检查这些文件中采购流程的规定是否一致，如有冲突列出来" rows="6"
+              style="width:100%;padding:12px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);color:var(--text);font-size:14px;outline:none;resize:vertical;font-family:inherit;line-height:1.6;"></textarea>
+            <button class="btn btn-primary" onclick="runFocusAnalysis()" id="btnFocusRun" style="margin-top:10px;">🔍 开始分析</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Mode B: Scan -->
+      <div class="analysis-panel" id="panelScan" style="display:none;">
+        <div class="analysis-section-label">📋 输入分析框架</div>
+        <textarea id="analysisFramework" placeholder="输入你的分析框架，例如：&#10;一、公司基本情况&#10;  1.1 公司名称、注册资本、股权结构&#10;  1.2 经营范围&#10;  1.3 组织架构&#10;二、财务状况&#10;  2.1 近三年营收&#10;  2.2 资产负债情况" rows="10"
+          style="width:100%;padding:12px;border:1px solid var(--border);border-radius:var(--radius);background:var(--card);color:var(--text);font-size:14px;outline:none;resize:vertical;font-family:inherit;line-height:1.6;"></textarea>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:10px;">
+          <button class="btn btn-primary" onclick="runScanAnalysis()" id="btnScanRun">🔍 开始遍历分析</button>
+          <span style="font-size:12px;color:var(--text-muted);" id="scanEstimate"></span>
+        </div>
+      </div>
+
+      <!-- Results -->
+      <div class="analysis-results" id="analysisResults" style="display:none;">
+        <div class="analysis-results-header">
+          <span id="analysisResultsTitle">分析结果</span>
+          <div>
+            <button class="btn btn-outline btn-sm" onclick="copyAnalysisResult()">📋 复制</button>
+            <button class="btn btn-outline btn-sm" onclick="exportAnalysisResult()">📥 导出</button>
+            <button class="btn btn-outline btn-sm" onclick="clearAnalysis()">✕ 清除</button>
+          </div>
+        </div>
+        <div class="analysis-results-spinner" id="analysisSpinner" style="display:none;">
+          <div class="spinner"></div>
+          <div id="analysisProgress" style="margin-top:10px;font-size:13px;color:var(--text-secondary);">分析中...</div>
+        </div>
+        <div class="analysis-output" id="analysisOutput"></div>
+        <div class="analysis-sources" id="analysisSources" style="display:none;">
+          <div class="analysis-section-label">📎 涉及文件</div>
+          <div id="analysisSourcesList"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Bottom Splitter ===== -->
+  <div class="splitter-h" id="bottomSplitter"></div>
+
+  <!-- ===== Bottom Error Panel ===== -->
+  <div class="bottom-panel" id="bottomPanel">
+    <div class="bottom-panel-header">
+      <span class="panel-title">📋 索引结果</span>
+      <span class="badge badge-ok" id="badgeOk" style="display:none;">成功 0</span>
+      <div class="error-tabs" id="errorTabs">
+        <span class="error-tab active" data-cat="all" onclick="filterErrors('all')">全部</span>
+        <span class="error-tab" data-cat="dup" onclick="filterErrors('dup')">
+          <span class="badge badge-dup">重复 <b id="badgeDup">0</b></span>
+        </span>
+        <span class="error-tab" data-cat="parse" onclick="filterErrors('parse')">
+          <span class="badge badge-parse">解析错误 <b id="badgeParse">0</b></span>
+        </span>
+        <span class="error-tab" data-cat="embed" onclick="filterErrors('embed')">
+          <span class="badge badge-embed">嵌入错误 <b id="badgeEmbed">0</b></span>
+        </span>
+      </div>
+      <span style="flex:1;"></span>
+      <button class="btn btn-outline btn-xs" onclick="clearErrors()">清除</button>
+    </div>
+    <div class="error-list" id="errorList">
+      <div class="empty-panel">等待索引任务...</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ Loading ============ -->
+<div class="loading-overlay" id="loadingOverlay">
+  <div class="loading-box">
+    <div class="spinner"></div>
+    <div class="loading-text" id="loadingText">处理中...</div>
+  </div>
+</div>
+
+<!-- ============ Settings Modal ============ -->
+<div class="modal-overlay" id="settingsModal">
+  <div class="modal">
+    <h2>⚙️ 设置</h2>
+    <label>DeepSeek API 密钥 (对话用)</label>
+    <input type="password" id="apiKeyInput" placeholder="sk-..." />
+    <div style="display:flex;gap:8px;margin-bottom:14px;">
+      <button class="btn btn-outline btn-sm" onclick="testApi()">测试连接</button>
+      <span id="apiTestResult" style="font-size:12px;align-self:center;"></span>
+    </div>
+    <label>Embedding API 密钥 <span style="font-weight:normal;font-size:11px;">(多个 Key 用逗号分隔)</span></label>
+    <input type="password" id="embeddingKeyInput" placeholder="留空则使用 DeepSeek API Key" />
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:14px;">
+      <button class="btn btn-outline btn-sm" onclick="testEmbeddingKeys()">测试全部 Key</button>
+      <span id="embedTestStatus" style="font-size:12px;"></span>
+    </div>
+    <div id="embedTestResults" style="display:none;margin-bottom:14px;max-height:180px;overflow-y:auto;font-size:12px;"></div>
+    <label>分块大小 (字符)</label>
+    <input type="number" id="chunkSizeInput" value="512" min="128" max="2048" />
+    <label>检索返回数量</label>
+    <input type="number" id="topKInput" value="5" min="1" max="20" />
+    <label>界面主题</label>
+    <select id="themeSelectModal"
+      style="width:100%;padding:9px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);font-size:14px;margin-bottom:14px;outline:none;transition:var(--transition);background:var(--card);color:var(--text);cursor:pointer;">
+      <option value="blue">🔵 专业蓝 (Professional Blue)</option>
+      <option value="glass">💠 玻璃拟态 (Glass Morphism)</option>
+    </select>
+    <div class="actions">
+      <button class="btn btn-outline" onclick="closeSettings()">取消</button>
+      <button class="btn btn-primary" onclick="saveSettings()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ Toast ============ -->
+<div class="toast" id="toast"></div>
+

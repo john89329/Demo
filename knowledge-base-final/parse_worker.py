@@ -6,29 +6,36 @@ Writes JSON result to stdout (UTF-8 bytes), errors to stderr.
 import sys
 import json
 import os
+import io
+import atexit
 import traceback
 
 # Ensure the project root is on sys.path so we can import services.*
 _project_root = os.path.dirname(os.path.abspath(__file__))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
+    
 
 # Suppress noisy library logging in subprocess
 os.environ.setdefault("GLOG_minloglevel", "3")
-os.environ.setdefault("PADDLEOCR_DISABLE_AUTO_LOGGING_CONFIG", "1")
+
+# Redirect text-mode stdout to devnull to catch library warnings (e.g. xlrd
+# OLE2 warnings). Save the original buffer so _write_json still works.
+_stdout_buffer = sys.stdout.buffer
+sys.stdout = io.TextIOWrapper(open(os.devnull, "wb"))
 
 
 def _write_json(obj):
     """Write JSON to stdout as UTF-8 bytes, bypassing GBK console encoding."""
     json_str = json.dumps(obj, ensure_ascii=False)
-    sys.stdout.buffer.write(json_str.encode("utf-8"))
-    sys.stdout.buffer.flush()
+    _stdout_buffer.write(json_str.encode("utf-8"))
+    _stdout_buffer.flush()
 
 
 def main():
     if len(sys.argv) < 2:
         _write_json({"status": "error", "error": "Usage: parse_worker.py <file_path> [--skip-ocr]"})
-        sys.exit(1)
+        os._exit(1)
 
     fpath = sys.argv[1]
     skip_ocr = "--skip-ocr" in sys.argv
@@ -55,7 +62,7 @@ def main():
             "error": str(e),
             "traceback": traceback.format_exc(),
         })
-        sys.exit(1)
+        os._exit(1)
 
 
 if __name__ == "__main__":

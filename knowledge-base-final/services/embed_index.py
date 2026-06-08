@@ -4,8 +4,11 @@ import numpy as np
 import urllib.request
 import urllib.error
 import time
+import logging
 
 import config
+
+_logger = logging.getLogger("kb.embed_index")
 
 
 def _migrate_legacy_index(kb_name=None):
@@ -197,7 +200,7 @@ class EmbeddingIndex:
                     body = e.read().decode("utf-8", errors="replace")
                     if e.code == 413 and len(batch) > 0:
                         half = [t[:len(t)//2] for t in batch]
-                        print(f"[WARN] 413 文本过长，截半重试 ({len(batch)} 条)")
+                        _logger.warning("413 文本过长，截半重试 (%d 条)", len(batch))
                         try:
                             data2 = json.dumps({
                                 "model": config.EMBEDDING_MODEL,

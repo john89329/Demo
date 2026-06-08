@@ -1,0 +1,17 @@
+{
+  "python_basics": {
+    "started_at": "2026-06-05T15:43:51.594031",
+    "completed_lessons": [
+      "00_setup"
+    ],
+    "current_lesson": "01_variables",
+    "scores": {
+      "00_setup": {
+        "correct": 2,
+        "total": 3,
+        "percentage": 67
+      }
+    },
+    "completed": false
+  }
+}

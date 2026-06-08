@@ -6,10 +6,11 @@ import shutil
 import threading
 import time
 import multiprocessing
+import logging
+from logging.handlers import RotatingFileHandler
 
-# Suppress PaddlePaddle/CUDA console windows on Windows — must run before any OCR import
+# Suppress library console windows on Windows — must run before any OCR import
 os.environ.setdefault("GLOG_minloglevel", "3")
-os.environ.setdefault("PADDLEOCR_DISABLE_AUTO_LOGGING_CONFIG", "1")
 
 from flask import Flask, request, jsonify, render_template
 
@@ -25,12 +26,41 @@ from services.audit_log import (
     list_sessions, get_session, set_topic, export_session_markdown, save_sessions,
 )
 
+# ── Logging setup ────────────────────────────────────────
+_log_format = logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+_file_handler = RotatingFileHandler(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.log"),
+    maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8",
+)
+_file_handler.setFormatter(_log_format)
+_file_handler.setLevel(logging.DEBUG)
+
+_console_handler = logging.StreamHandler(sys.stdout)
+_console_handler.setFormatter(_log_format)
+_console_handler.setLevel(logging.INFO)
+
+_logger = logging.getLogger("kb")
+_logger.setLevel(logging.DEBUG)
+_logger.addHandler(_file_handler)
+_logger.addHandler(_console_handler)
+
+# Also capture Flask's own logs
+logging.getLogger("werkzeug").handlers = []
+logging.getLogger("werkzeug").addHandler(_file_handler)
+
 app = Flask(__name__, template_folder="templates")
 
 _chat_histories = {}  # kb_name -> list
+_chat_histories_lock = threading.Lock()
 LIBS_FILE = os.path.join(config.INDEX_DIR, "libraries.json")
 _indexing_status = {}  # kb_name -> status dict
+_indexing_status_lock = threading.Lock()
 _indexing_stop_events = {}  # kb_name -> threading.Event, set to request stop
+_indexing_stop_events_lock = threading.Lock()
 
 
 def _default_index_status():
@@ -38,9 +68,10 @@ def _default_index_status():
 
 
 def _get_index_status(kb_name):
-    if kb_name not in _indexing_status:
-        _indexing_status[kb_name] = _default_index_status()
-    return _indexing_status[kb_name]
+    with _indexing_status_lock:
+        if kb_name not in _indexing_status:
+            _indexing_status[kb_name] = _default_index_status()
+        return _indexing_status[kb_name]
 
 
 def _ensure_libraries():
@@ -222,11 +253,16 @@ def scan_directory():
 
 
 def _get_python_exe():
-    """Return python.exe (not pythonw.exe) for subprocess launching.
+    """Return python.exe for subprocess launching.
 
-    pythonw.exe on Windows has no console and may not initialize stdio
-    properly in child processes, causing empty stdout/stderr and exit code 1.
+    Prefer the venv311 Python so that subprocess workers have access to
+    rapidocr, pymupdf, and all other installed packages. Falls back to
+    the current process's Python if venv311 is not found.
     """
+    root_dir = os.path.dirname(os.path.abspath(__file__))
+    venv_python = os.path.join(root_dir, "venv311", "Scripts", "python.exe")
+    if os.path.exists(venv_python):
+        return venv_python
     exe = sys.executable
     if exe.endswith("pythonw.exe"):
         exe = exe[:-len("pythonw.exe")] + "python.exe"
@@ -260,7 +296,10 @@ def _parse_via_subprocess(fpath, skip_ocr=False, timeout=None):
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
     except subprocess.TimeoutExpired as e:
-        stderr_tail = e.stderr[-500:] if e.stderr else ""
+        stderr_raw = e.stderr
+        if isinstance(stderr_raw, bytes):
+            stderr_raw = stderr_raw.decode("utf-8", errors="replace")
+        stderr_tail = stderr_raw[-500:] if stderr_raw else ""
         raise RuntimeError(
             f"解析超时（>{timeout_val}秒）。"
             f"手动测试: python parse_worker.py \"{os.path.basename(fpath)}\""
@@ -281,7 +320,7 @@ def _parse_via_subprocess(fpath, skip_ocr=False, timeout=None):
         )
 
     try:
-        result = json.loads(stdout_text)
+        result, _ = json.JSONDecoder().raw_decode(stdout_text)
     except json.JSONDecodeError as e:
         raise RuntimeError(
             f"JSON解析失败（退出码 {proc.returncode}）：{e}\n"
@@ -340,8 +379,11 @@ def build_index():
         store = get_store(kb)
         idx_status = _get_index_status(kb)
         # Stop mechanism + per-file status tracking
-        stop_event = _indexing_stop_events.setdefault(kb, threading.Event())
+        with _indexing_stop_events_lock:
+            stop_event = _indexing_stop_events.setdefault(kb, threading.Event())
         stop_event.clear()
+        cancelled_indices = set()  # file indices cancelled by user during indexing
+        idx_status["cancelled_indices"] = cancelled_indices
         idx_status["file_statuses"] = []
         total_chunks = 0
         n = len(flist)
@@ -388,7 +430,7 @@ def build_index():
                             else:
                                 normalized.append({"type": "parse_error", "file": "", "path": "", "message": s})
                     idx_status["errors"] = normalized
-                    print(f"[Checkpoint] Resuming from file #{resume_from}/{n} (status={cp_status})")
+                    _logger.info("Checkpoint: resuming from file #%d/%d (status=%s)", resume_from, n, cp_status)
             except Exception:
                 pass
 
@@ -401,7 +443,7 @@ def build_index():
                 shutil.copy2(index_bak, store._index_path)
                 shutil.copy2(db_bak, store._db_path)
                 store.load()
-                print("[Recovery] Restored FAISS + SQLite from backup (previous run crashed)")
+                _logger.info("Recovery: restored FAISS + SQLite from backup (previous run crashed)")
             os.remove(index_bak)
             os.remove(db_bak)
 
@@ -422,6 +464,7 @@ def build_index():
         # ── Dedup: skip files with duplicate content (same MD5) ──
         manifest_path = os.path.join(config.INDEX_DIR, kb, "file_manifest.json")
         dedup_cache_path = os.path.join(config.INDEX_DIR, kb, "dedup_cache.json")
+        _logger.info("Dedup: checking %d files for duplicates...", n)
 
         # Build lookup tables from manifest
         known_hashes = {}     # hash → path (for detecting duplicates across runs)
@@ -453,7 +496,7 @@ def build_index():
                     # Rebuild hash→path for dedup
                     for p, h in path_hash_cache.items():
                         batch_hashes[h] = p
-                    print(f"[Dedup] Loaded {len(path_hash_cache)} cached hashes, skipping recompute")
+                    _logger.info("Dedup: loaded %d cached hashes, skipping recompute", len(path_hash_cache))
             except Exception:
                 pass
 
@@ -490,7 +533,7 @@ def build_index():
             if file_hash in known_hashes:
                 dup_path = known_hashes[file_hash]
                 idx_status["errors"].append({
-                    "type": "duplicate", "file": os.path.basename(fpath),
+                    "type": "duplicate", "file": os.path.basename(fpath), "path": fpath,
                     "message": f"跳过（与已索引的 {os.path.basename(dup_path)} 内容重复）"
                 })
                 flist[i] = None
@@ -499,7 +542,7 @@ def build_index():
             elif file_hash in batch_hashes:
                 dup_path = batch_hashes[file_hash]
                 idx_status["errors"].append({
-                    "type": "duplicate", "file": os.path.basename(fpath),
+                    "type": "duplicate", "file": os.path.basename(fpath), "path": fpath,
                     "message": f"跳过（与本批次 {os.path.basename(dup_path)} 内容重复）"
                 })
                 flist[i] = None
@@ -520,12 +563,20 @@ def build_index():
         idx_status["file_statuses"] = []
         for i, fpath in enumerate(flist):
             if fpath is None:
-                idx_status["file_statuses"].append({"path": "", "name": "跳过重复", "status": "duplicate", "chunks": 0})
+                idx_status["file_statuses"].append({"path": "", "name": "", "status": "duplicate", "chunks": 0})
             else:
                 idx_status["file_statuses"].append({"path": fpath, "name": os.path.basename(fpath), "status": "pending", "chunks": 0})
+        # Backfill duplicate file names from the error list
+        dup_entries = [e for e in idx_status["errors"] if e.get("type") == "duplicate"]
+        dup_idx = 0
+        for fs in idx_status["file_statuses"]:
+            if fs["status"] == "duplicate" and dup_idx < len(dup_entries):
+                fs["name"] = dup_entries[dup_idx].get("file", "")
+                fs["path"] = dup_entries[dup_idx].get("path", "")
+                dup_idx += 1
 
         if dup_count:
-            print(f"[Dedup] 跳过 {dup_count} 个重复文件")
+            _logger.info("Dedup: skipped %d duplicate files", dup_count)
 
         effective_n = n - dup_count  # actual number of files to process
         idx_status["total"] = effective_n
@@ -546,7 +597,7 @@ def build_index():
                     parsed_batches = json.load(f)
                 loaded_from_cache = True
                 already_parsed = len([x for x in parsed_batches if x is not None])
-                print(f"[Checkpoint] Loaded {already_parsed} parsed files from cache (status={cp_status})")
+                _logger.info("Checkpoint: loaded %d parsed files from cache (status=%s)", already_parsed, cp_status)
             except Exception:
                 pass
 
@@ -623,10 +674,12 @@ def build_index():
 
         ocr_files = [(i, fp) for i, fp in need_parse if _needs_ocr(fp)]
         fast_files = [(i, fp) for i, fp in need_parse if (i, fp) not in set(ocr_files)]
-        if ocr_files:
-            print(f"[Pipeline] {len(ocr_files)} files need OCR → dedicated 1-thread pool")
-        if fast_files:
-            print(f"[Pipeline] {len(fast_files)} fast-text files → {config.INDEX_WORKERS - 1}-thread pool")
+
+        ocr_count = len(ocr_files)
+        fast_count = len(fast_files)
+        _logger.info("Pipeline: %d fast-text + %d OCR files -> %d-thread unified pool",
+                     fast_count, ocr_count, config.INDEX_WORKERS)
+        idx_status["progress"] = f"[{kb}] OCR: {ocr_count}个文件, 快速: {fast_count}个文件, 开始解析..."
 
         t_parse_elapsed = 0.0
         total_embed_api_time = 0.0
@@ -666,6 +719,14 @@ def build_index():
                         break
                     i, fpath, chunks = item
                     fname = os.path.basename(fpath)
+                    # Check if user cancelled this file
+                    if i in cancelled_indices:
+                        if i < len(idx_status.get("file_statuses", [])):
+                            idx_status["file_statuses"][i]["status"] = "cancelled"
+                        with pipeline_lock:
+                            pipe_state["embedded_count"] += 1
+                        chunk_queue.task_done()
+                        continue
                     # Update file status: embedding
                     if i < len(idx_status.get("file_statuses", [])):
                         idx_status["file_statuses"][i]["status"] = "embedding"
@@ -739,6 +800,7 @@ def build_index():
                             ec = pipe_state["embedded_count"]
                         if i < len(idx_status.get("file_statuses", [])):
                             idx_status["file_statuses"][i]["status"] = "error"
+                            idx_status["file_statuses"][i]["error"] = str(e)
                         idx_status["errors"].append({
                             "type": "embed_error", "file": fname, "path": fpath,
                             "message": str(e)
@@ -751,15 +813,29 @@ def build_index():
                 nonlocal parsed_count, parse_errors
                 t0 = time.time()
                 fname = os.path.basename(fpath)
+                is_ocr = not skip_ocr
+                tag = "[OCR]" if is_ocr else "[FAST]"
+                file_timeout = config.OCR_PARSE_TIMEOUT if is_ocr else config.PARSE_TIMEOUT
+                _logger.info("%s 开始解析: %s (超时: %ds)", tag, fname, file_timeout)
                 # Update file status: parsing
                 if i < len(idx_status.get("file_statuses", [])):
                     idx_status["file_statuses"][i]["status"] = "parsing"
                     idx_status["file_statuses"][i]["started_at"] = time.time()
+                # Check if user cancelled this file
+                if i in cancelled_indices:
+                    _logger.info("%s 已取消: %s", tag, fname)
+                    if i < len(idx_status.get("file_statuses", [])):
+                        idx_status["file_statuses"][i]["status"] = "cancelled"
+                    with pipeline_lock:
+                        parsed_count += 1
+                        pipe_state["embedded_count"] += 1
+                    return
                 try:
-                    parsed = _parse_via_subprocess(fpath, skip_ocr=skip_ocr)
+                    parsed = _parse_via_subprocess(fpath, skip_ocr=skip_ocr, timeout=file_timeout)
 
                     chunks = chunk_document(parsed)
                     elapsed = time.time() - t0
+                    _logger.info("%s 解析完成: %s (%.1fs, %d chunks)", tag, fname, elapsed, len(chunks))
                     parse_times.append((fname, elapsed, len(chunks)))
                     chunk_dicts = []
                     if chunks:
@@ -785,7 +861,7 @@ def build_index():
                         try:
                             chunk_queue.put((i, fpath, chunk_dicts), timeout=30)
                         except Exception:
-                            print(f"[Pipeline] Queue full for 30s, skipping embedding for {fname}")
+                            _logger.warning("Pipeline: queue full for 30s, skipping embedding for %s", fname)
                             idx_status["errors"].append({
                                 "type": "embed_error", "file": fname, "path": fpath,
                                 "message": "队列满超时，跳过嵌入"
@@ -809,11 +885,12 @@ def build_index():
                     _tb.print_exc()
                     error_msg = str(e)
                     if stderr_info and stderr_info not in error_msg:
-                        print(f"[Parse] {fname} stderr: {stderr_info}")
-                    print(f"[Parse] {fname} failed: {error_msg}")
+                        _logger.warning("Parse: %s stderr: %s", fname, stderr_info)
+                    _logger.error("Parse: %s failed: %s", fname, error_msg)
                     parsed_batches[i] = []
                     if i < len(idx_status.get("file_statuses", [])):
                         idx_status["file_statuses"][i]["status"] = "error"
+                        idx_status["file_statuses"][i]["error"] = error_msg
                     idx_status["errors"].append({
                         "type": "parse_error", "file": fname, "path": fpath,
                         "message": error_msg
@@ -839,7 +916,7 @@ def build_index():
                     chunk_queue.put((i, fpath, chunks), timeout=60)
                 except Exception:
                     fname = os.path.basename(fpath)
-                    print(f"[Pipeline] Queue full, skipping pre-queue for {fname}")
+                    _logger.warning("Pipeline: queue full, skipping pre-queue for %s", fname)
                     idx_status["errors"].append({
                         "type": "embed_error", "file": fname, "path": fpath,
                         "message": "预排队超时，跳过嵌入"
@@ -847,34 +924,27 @@ def build_index():
 
             t_parse_start = time.time()
 
+            # Unified pool: submit fast files first so they complete quickly,
+            # then OCR files. All threads can handle any file type.
             if fast_files or ocr_files:
                 parse_future_map = {}
-                parse_start_times = {}
+                unified_pool = ThreadPoolExecutor(max_workers=config.INDEX_WORKERS)
 
-                # Fast pool: INDEX_WORKERS-1 threads (or full if no OCR files)
-                fast_workers = config.INDEX_WORKERS - 1 if ocr_files else config.INDEX_WORKERS
-                fast_pool = ThreadPoolExecutor(max_workers=fast_workers) if fast_files else None
-                if fast_pool and fast_files:
-                    for i, fpath in fast_files:
-                        f = fast_pool.submit(parse_and_enqueue, fpath, i, True)
-                        parse_future_map[f] = (i, os.path.basename(fpath), fpath)
-                        parse_start_times[f] = time.time()
+                # Fast files first (prioritized), then OCR files
+                for i, fpath in fast_files:
+                    f = unified_pool.submit(parse_and_enqueue, fpath, i, True)
+                    parse_future_map[f] = (i, os.path.basename(fpath), fpath)
 
-                # OCR pool: 1 dedicated thread for image/scan PDFs
-                ocr_pool = ThreadPoolExecutor(max_workers=1) if ocr_files else None
-                if ocr_pool and ocr_files:
-                    for i, fpath in ocr_files:
-                        f = ocr_pool.submit(parse_and_enqueue, fpath, i, False)
-                        parse_future_map[f] = (i, os.path.basename(fpath), fpath)
-                        parse_start_times[f] = time.time()
+                for i, fpath in ocr_files:
+                    f = unified_pool.submit(parse_and_enqueue, fpath, i, False)
+                    parse_future_map[f] = (i, os.path.basename(fpath), fpath)
 
                 parse_remaining = set(parse_future_map.keys())
 
                 try:
                     while parse_remaining:
-                        # Check stop signal
                         if stop_event.is_set():
-                            print(f"[Parse] Stop signal received — saving checkpoint and exiting")
+                            _logger.info("Parse: stop signal received, saving checkpoint and exiting")
                             for f in parse_remaining:
                                 f.cancel()
                             for f in parse_remaining:
@@ -894,19 +964,6 @@ def build_index():
                             except Exception:
                                 pass  # error already handled in parse_and_enqueue
 
-                        # Check for parse timeouts (safety net: subprocess handles its own timeout)
-                        now = time.time()
-                        for f in list(parse_remaining):
-                            if now - parse_start_times[f] > config.PARSE_TIMEOUT + 30:
-                                i, fname, fpath = parse_future_map[f]
-                                print(f"[Parse] THREAD TIMEOUT: {fname} stuck in thread, cancelling future")
-                                # Don't add error — subprocess timeout already handled in parse_and_enqueue
-                                if i < len(idx_status.get("file_statuses", [])):
-                                    if idx_status["file_statuses"][i]["status"] == "parsing":
-                                        idx_status["file_statuses"][i]["status"] = "error"
-                                f.cancel()
-                                parse_remaining.discard(f)
-
                         # Update progress with active file names
                         active = [parse_future_map[f][1] for f in parse_remaining if f in parse_future_map]
                         active_hint = f"，解析中: {', '.join(active[:3])}" if active else ""
@@ -916,13 +973,13 @@ def build_index():
                             f"队列: {chunk_queue.qsize()}{active_hint}"
                         )
                 finally:
-                    if fast_pool:
-                        fast_pool.shutdown(wait=False)
-                    if ocr_pool:
-                        ocr_pool.shutdown(wait=False)
+                    unified_pool.shutdown(wait=True)
 
             t_parse_end = time.time()
             t_parse_elapsed = t_parse_end - t_parse_start
+            cancelled = effective_n - parsed_count
+            _logger.info("Parse: 阶段完成: parsed=%d/%d, errors=%d, cancelled=%d, elapsed=%.1fs",
+                  parsed_count, effective_n, parse_errors, cancelled, t_parse_elapsed)
 
             # Signal embed workers that parsing is done
             parsing_done.set()
@@ -948,10 +1005,11 @@ def build_index():
                         idx_status["progress"] = f"[{kb}] 解析 {effective_n}/{effective_n}，嵌入 {ec_done}/{effective_n}，等待嵌入线程退出..."
             except cf.TimeoutError:
                 incomplete = [f for f in embed_futures if not f.done()]
-                print(f"[Pipeline] Embedding timeout after {embed_timeout}s — {len(incomplete)}/{config.EMBED_WORKERS} workers did not finish")
+                _logger.warning("Pipeline: embedding timeout after %ds — %d/%d workers did not finish",
+                              embed_timeout, len(incomplete), config.EMBED_WORKERS)
 
             embed_executor.shutdown(wait=False)
-            print(f"[Pipeline] All embed workers done — saving index...")
+            _logger.info("Pipeline: all embed workers done, saving index...")
 
             # Deferred PQ training (avoids blocking embed workers during indexing)
             store.train_pq_if_needed()
@@ -976,26 +1034,33 @@ def build_index():
         t_total = time.time() - t_start
         t_pipeline = t_total - t_remove_elapsed
         total_parse_chunks = sum(n_chunks for _, _, n_chunks in parse_times)
-        print(f"\n{'='*60}")
-        print(f"[Profile] ====== 索引性能分析 =====")
-        print(f"[Profile] 总耗时:     {t_total:.1f}s ({t_total/60:.1f}min)")
-        print(f"[Profile] --------------------------------------------------")
-        print(f"[Profile] 管道: 解析+嵌入并行")
-        print(f"[Profile]   解析:       {t_parse_elapsed:.1f}s ({len(parse_times)}文件, {total_parse_chunks}块)")
-        print(f"[Profile]   批量删除:   {t_remove_elapsed:.1f}s")
-        print(f"[Profile]   API 调用:   {total_embed_api_time:.1f}s (并行 {config.EMBED_WORKERS} 线程, "
-              f"实际 {total_embed_api_time/total_chunks*1000:.0f}ms/chunk)" if total_chunks > 0 else f"[Profile]   API 调用:   {total_embed_api_time:.1f}s")
-        print(f"[Profile]   FAISS写:    {total_faiss_write_time:.1f}s")
+        # ── Profiling summary ──
+        total_parse_chunks = sum(n_chunks for _, _, n_chunks in parse_times)
+        _profile_lines = [
+            "====== 索引性能分析 =====",
+            f"总耗时: {t_total:.1f}s ({t_total/60:.1f}min)",
+            "---",
+            f"解析: {t_parse_elapsed:.1f}s ({len(parse_times)}文件, {total_parse_chunks}块)",
+            f"批量删除: {t_remove_elapsed:.1f}s",
+        ]
+        if total_chunks > 0:
+            _profile_lines.append(
+                f"API调用: {total_embed_api_time:.1f}s (并行{config.EMBED_WORKERS}线程, "
+                f"{total_embed_api_time/total_chunks*1000:.0f}ms/chunk)")
+        else:
+            _profile_lines.append(f"API调用: {total_embed_api_time:.1f}s")
+        _profile_lines.append(f"FAISS写: {total_faiss_write_time:.1f}s")
         if t_parse_elapsed > 0 and total_embed_api_time > 0:
             overlap_saved = (t_parse_elapsed + total_embed_api_time) - t_pipeline
-            print(f"[Profile]   重叠节省:   {overlap_saved:.1f}s (并行收益)")
-        print(f"[Profile] --------------------------------------------------")
+            _profile_lines.append(f"重叠节省: {overlap_saved:.1f}s (并行收益)")
+        _profile_lines.append("---")
         if parse_times:
             parse_times.sort(key=lambda x: -x[1])
-            print(f"[Profile] 最慢解析 TOP3: " + ", ".join(
+            _profile_lines.append("最慢解析 TOP3: " + ", ".join(
                 f"{fname}({t:.1f}s/{nchunks}块)" for fname, t, nchunks in parse_times[:3]
             ))
-        print(f"[Profile] ==================================================\n")
+        _profile_lines.append("================================")
+        _logger.info("Profile:\n%s", "\n".join(f"  {line}" for line in _profile_lines))
 
         # ── Write manifest (with MD5 hashes for dedup) ──
         manifest_path = os.path.join(config.INDEX_DIR, kb, "file_manifest.json")
@@ -1049,6 +1114,9 @@ def build_index():
             f"解析错误: {parse_errors}, 嵌入错误: {embed_errors}"
         )
 
+        # Persist failed files for the /api/kb/failed-files endpoint
+        _save_failed_files(kb, idx_status)
+
     thread = threading.Thread(target=index_task, daemon=True)
     thread.start()
     return jsonify({"success": True, "data": {"message": "索引已开始", "total_files": len(files), "kb_name": kb_name}})
@@ -1057,17 +1125,141 @@ def build_index():
 @app.route("/api/kb/indexing-status", methods=["GET"])
 def get_indexing_status():
     kb_name = request.args.get("kb_name", config.CURRENT_KB)
-    return jsonify({"success": True, "data": _get_index_status(kb_name)})
+    status = dict(_get_index_status(kb_name))
+    # Convert non-serializable sets to lists for JSON
+    if "cancelled_indices" in status and isinstance(status["cancelled_indices"], set):
+        status["cancelled_indices"] = sorted(status["cancelled_indices"])
+    return jsonify({"success": True, "data": status})
+
+
+@app.route("/api/kb/failed-files", methods=["GET"])
+def get_failed_files():
+    """Return files that were not successfully indexed in the last run."""
+    kb_name = request.args.get("kb_name", config.CURRENT_KB)
+    status = _get_index_status(kb_name)
+
+    # Use in-memory data if available, otherwise fall back to persisted file
+    fss = status.get("file_statuses", [])
+    errors = status.get("errors", [])
+    if not fss:
+        # Try loading from disk
+        cached = _load_failed_files(kb_name)
+        if cached:
+            return jsonify({"success": True, "data": cached})
+        return jsonify({"success": True, "data": {"total": 0, "failed": [], "groups": {}}})
+
+    if status.get("running"):
+        return jsonify({"success": False, "error": "索引仍在进行中"})
+
+    result = _build_failed_groups(fss, errors)
+    return jsonify({"success": True, "data": result})
+
+
+def _build_failed_groups(fss, errors):
+    """Build grouped failed-files structure from file_statuses and errors."""
+    groups = {"parse_error": [], "embed_error": [], "duplicate": [], "cancelled": []}
+    for idx, fs in enumerate(fss):
+        st = fs.get("status", "pending")
+        if st == "embedded":
+            continue
+        entry = {
+            "index": idx,
+            "name": fs.get("name", ""),
+            "path": fs.get("path", ""),
+            "status": st,
+            "error": fs.get("error", ""),
+        }
+        if st == "error":
+            matched = False
+            fp = fs.get("path", "")
+            for e in errors:
+                if e.get("path") == fp:
+                    if e.get("type") == "embed_error":
+                        groups["embed_error"].append(entry)
+                    else:
+                        groups["parse_error"].append(entry)
+                    matched = True
+                    break
+            if not matched:
+                groups["parse_error"].append(entry)
+        elif st in ("duplicate",):
+            groups["duplicate"].append(entry)
+        elif st in ("cancelled", "cancelling"):
+            groups["cancelled"].append(entry)
+        elif st in ("pending", "parsing", "parsed", "embedding"):
+            groups["parse_error"].append({**entry, "status": "incomplete", "error": "索引中断，未完成"})
+
+    failed = []
+    for g in ["parse_error", "embed_error", "duplicate", "cancelled"]:
+        failed.extend(groups[g])
+
+    return {"total": len(failed), "failed": failed, "groups": groups}
+
+
+def _failed_files_path(kb_name):
+    return os.path.join(config.INDEX_DIR, kb_name, "failed_files.json")
+
+
+def _save_failed_files(kb_name, idx_status):
+    """Persist failed files info to disk so it survives restarts."""
+    fss = idx_status.get("file_statuses", [])
+    errors = idx_status.get("errors", [])
+    if not fss:
+        return
+    try:
+        result = _build_failed_groups(fss, errors)
+        path = _failed_files_path(kb_name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _load_failed_files(kb_name):
+    """Load persisted failed files from disk."""
+    path = _failed_files_path(kb_name)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 
 @app.route("/api/kb/stop-indexing", methods=["POST"])
 def stop_indexing():
     kb_name = _get_kb_name()
-    event = _indexing_stop_events.get(kb_name)
+    with _indexing_stop_events_lock:
+        event = _indexing_stop_events.get(kb_name)
     if event:
         event.set()
         return jsonify({"success": True, "data": {"message": "已发送停止信号，将在当前批次完成后停止"}})
     return jsonify({"success": False, "error": "没有正在进行的索引任务"})
+
+
+@app.route("/api/kb/cancel-file", methods=["POST"])
+def cancel_file():
+    """Cancel a single file in the running index pipeline."""
+    data = request.get_json() or {}
+    kb_name = data.get("kb_name", config.CURRENT_KB)
+    file_index = data.get("file_index")
+    if file_index is None:
+        return jsonify({"success": False, "error": "未指定文件索引"})
+    status = _get_index_status(kb_name)
+    if not status.get("running"):
+        return jsonify({"success": False, "error": "没有正在进行的索引任务"})
+    cancelled = status.get("cancelled_indices")
+    if cancelled is None:
+        return jsonify({"success": False, "error": "无法取消：索引任务不支持逐文件取消"})
+    cancelled.add(int(file_index))
+    # Mark in file_statuses immediately for UI feedback
+    fss = status.get("file_statuses", [])
+    idx = int(file_index)
+    if idx < len(fss) and fss[idx]["status"] in ("pending", "parsing", "parsed", "embedding"):
+        fss[idx]["status"] = "cancelling"
+    return jsonify({"success": True, "data": {"message": f"已标记文件 #{file_index} 取消", "file_index": file_index}})
 
 
 # ── Status / Files / Clear ──────────────────────────────
@@ -1312,15 +1504,15 @@ def clear_index():
     store.clear()
     # Also clean up manifest and checkpoint
     kb_dir = os.path.join(config.INDEX_DIR, kb_name)
-    for fname in ["file_manifest.json", "index_checkpoint.json", "dedup_cache.json", "parsed_chunks.json"]:
+    for fname in ["file_manifest.json", "index_checkpoint.json", "dedup_cache.json", "parsed_chunks.json", "failed_files.json"]:
         fpath = os.path.join(kb_dir, fname)
         if os.path.exists(fpath):
             try:
                 os.remove(fpath)
             except Exception:
                 pass
-    global _chat_histories
-    _chat_histories[kb_name] = []
+    with _chat_histories_lock:
+        _chat_histories[kb_name] = []
     _save_chat_history(kb_name)
     return jsonify({"success": True, "data": {"message": f"「{kb_name}」索引已清除"}})
 
@@ -1558,7 +1750,8 @@ def chat():
         history.append({"role": "user", "content": query})
         history.append({"role": "assistant", "content": result["answer"], "sources": result["sources"]})
         if len(history) > 200:
-            _chat_histories[kb_name] = history[-200:]
+            with _chat_histories_lock:
+                _chat_histories[kb_name] = history[-200:]
         _save_chat_history(kb_name)
         return jsonify({"success": True, "data": result})
     except Exception as e:
@@ -1613,18 +1806,18 @@ def test_single_file():
     if ext not in config.SUPPORTED_EXTENSIONS and ext not in {".txt", ".csv", ".md"}:
         return jsonify({"success": False, "error": f"不支持的文件格式: {ext}"})
 
-    print(f"[TestFile] 开始解析: {fname}")
+    _logger.info("TestFile: 开始解析: %s", fname)
     t0 = time.time()
     try:
         parsed = _parse_via_subprocess(fpath)
     except Exception as e:
         elapsed = time.time() - t0
-        print(f"[TestFile] {fname} 解析失败 ({elapsed:.1f}s): {e}")
+        _logger.error("TestFile: %s 解析失败 (%.1fs): %s", fname, elapsed, e)
         return jsonify({"success": False, "error": str(e)})
     elapsed = time.time() - t0
     chunks = chunk_document(parsed)
 
-    print(f"[TestFile] {fname} 解析完成: {len(parsed.content)} 字符, {len(chunks)} 块, 耗时 {elapsed:.1f}s")
+    _logger.info("TestFile: %s 解析完成: %d 字符, %d 块, 耗时 %.1fs", fname, len(parsed.content), len(chunks), elapsed)
     return jsonify({"success": True, "data": {
         "file_name": parsed.file_name,
         "file_type": parsed.file_type,
@@ -1647,8 +1840,8 @@ def get_chat_history():
 def clear_chat_history():
     data = request.get_json(silent=True) or {}
     kb_name = data.get("kb_name", config.CURRENT_KB)
-    global _chat_histories
-    _chat_histories[kb_name] = []
+    with _chat_histories_lock:
+        _chat_histories[kb_name] = []
     _save_chat_history(kb_name)
     return jsonify({"success": True, "data": {"message": f"「{kb_name}」对话已清除"}})
 
@@ -1918,41 +2111,57 @@ def _history_path(kb_name):
     return os.path.join(config.INDEX_DIR, kb_name, "chat_history.json")
 
 
-def _load_chat_history(kb_name=None):
-    global _chat_histories
-    kb_name = kb_name or config.CURRENT_KB
+def _read_chat_history_from_disk(kb_name):
+    """Pure read from disk — no lock, no side effects. Returns list or None."""
     path = _history_path(kb_name)
     try:
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, list):
-                    _chat_histories[kb_name] = data[-200:]
+                    return data[-200:]
     except Exception as e:
-        print(f"[WARN] 聊天历史加载失败 ({kb_name}): {e}")
-    if kb_name not in _chat_histories:
-        _chat_histories[kb_name] = []
+        _logger.warning("聊天历史加载失败 (%s): %s", kb_name, e)
+    return None
+
+
+def _load_chat_history(kb_name=None):
+    kb_name = kb_name or config.CURRENT_KB
+    history_data = _read_chat_history_from_disk(kb_name)
+    with _chat_histories_lock:
+        if history_data is not None:
+            _chat_histories[kb_name] = history_data
+        if kb_name not in _chat_histories:
+            _chat_histories[kb_name] = []
 
 
 def _save_chat_history(kb_name=None):
-    global _chat_histories
     kb_name = kb_name or config.CURRENT_KB
     path = _history_path(kb_name)
-    history = _chat_histories.get(kb_name, [])
+    with _chat_histories_lock:
+        history = list(_chat_histories.get(kb_name, []))
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(history[-200:], f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"[WARN] 聊天历史保存失败 ({kb_name}): {e}")
+        _logger.warning("聊天历史保存失败 (%s): %s", kb_name, e)
 
 
 def _get_chat_history(kb_name=None):
-    global _chat_histories
     kb_name = kb_name or config.CURRENT_KB
-    if kb_name not in _chat_histories:
-        _load_chat_history(kb_name)
-    return _chat_histories[kb_name]
+    with _chat_histories_lock:
+        if kb_name in _chat_histories:
+            return list(_chat_histories[kb_name])
+
+    # Cache miss: load from disk without holding lock
+    history_data = _read_chat_history_from_disk(kb_name)
+
+    # Double-check: another thread may have loaded the same kb while we did I/O
+    with _chat_histories_lock:
+        if kb_name not in _chat_histories:
+            _chat_histories[kb_name] = history_data if history_data is not None else []
+        return list(_chat_histories[kb_name])
 
 
 def _format_size(size):
@@ -1972,9 +2181,9 @@ def start_server(host="127.0.0.1", port=5000, debug=False):
     try:
         store.load()
     except Exception as e:
-        print(f"[WARN] 索引加载失败，已忽略: {e}")
+        _logger.warning("索引加载失败，已忽略: %s", e)
     url = f"http://{host}:{port}"
-    print(f"知识库服务已启动: {url}")
+    _logger.info("知识库服务已启动: %s", url)
     webbrowser.open(url)
     app.run(host=host, port=port, debug=debug, threaded=True, use_reloader=False)
 

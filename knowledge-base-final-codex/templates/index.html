@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>知识库</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script>
+// Prevent FOUC — set theme attribute before CSS loads
+(function(){
+  var t='blue';
+  try{var s=JSON.parse(localStorage.getItem('kb_settings'));if(s&&s.theme)t=s.theme;}catch(e){}
+  document.documentElement.setAttribute('data-theme',t);
+})();
+</script>
+<style>{% include '_styles.html' %}</style>
+</head>
+<body>
+{% include '_layout.html' %}
+<script>{% include '_scripts.html' %}</script>
+</body>
+</html>
